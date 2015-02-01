@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 from pyraf import iraf
+from StdSuites.QuickDraw_Graphics_Suite import pixels
 iraf.pysalt()
 iraf.saltspec()
 iraf.saltred()
@@ -17,6 +18,8 @@ from astropy.wcs import WCS
 from scipy import optimize
 import ds9
 
+from sklearn.gaussian_process import GaussianProcess
+import pandas
 
 iraf.onedspec()
 iraf.twodspec()
@@ -29,9 +32,9 @@ pysaltpath = '/usr/local/astro64/iraf/extern/pysalt'
 
 # Define the stages
 allstages = ['pysalt', 'makeflats', 'flatten', 'mosaic', 'combine2d',
-             'identify2d', 'rectify', 'background', 'lax', 'extract',
-             'stdsensfunc', 'fluxscale', 'speccombine', 'mktelluric',
-             'telluric']
+             'identify2d', 'rectify', 'slitnormalize', 'background', 'lax',
+             'extract', 'stdsensfunc', 'fluxscale', 'speccombine',
+             'mktelluric', 'telluric']
 
 
 def tofits(filename, data, hdr=None, clobber=False):
@@ -976,42 +979,154 @@ def speccombine():
     # run scombine after multiplying the spectra by the best fit parameters
     if os.path.exists('out.fits'):
         os.remove('out.fits')
-    iraf.scombine(iraf_filelist, 'sci.fits', scale='@flx/scales.dat',
+    iraf.scombine(iraf_filelist, 'sci_com.fits', scale='@flx/scales.dat',
                   reject='avsigclip', lthreshold=1e-19)
     # Remove the other apertures
     # remove the sky and arc bands from the combined spectra.
+    os.chdir('..')
     return specs
 
 
-# Define the telluric B and A band begin:end wavelengths
-telluricWaves = {'B': (6855, 6935), 'A': (7590, 7685)}
-#    w =  where( (wave GE 3190) AND (wave LE 3216),  nw)
-#     if (nw GT 0) then bstar(w) =  1
-# ;    w =  where( (wave GE 3420) AND (wave LE 5600),  nw)
-#     w =  where( (wave GE 3420) AND (wave LE 5500),  nw)
-#     if (nw GT 0) then bstar(w) =  1
-#     w =  where( (wave GE 6050) AND (wave LE 6250),  nw)
-#     if (nw GT 0) then bstar(w) =  1
-#     w =  where( (wave GE 6360) AND (wave LE 6450),  nw)
-#     if (nw GT 0) then bstar(w) =  1
-#     w =  where( (wave GE 6530) AND (wave LE 6840),  nw)
-#     if (nw GT 0) then bstar(w) =  1
-#     w =  where( (wave GE 7410) AND (wave LE 7560),  nw)
-#     if (nw GT 0) then bstar(w) =  1
-#     w =  where( (wave GE 8410) AND (wave LE 8800),  nw)
-#     if (nw GT 0) then bstar(w) =  1
-#     w =  where( (wave GE 9900),  nw)
-#     if (nw GT 0) then bstar(w) =  1
+# Define the telluric bands wavelength regions
+# These numbers were taken directly from Tom Matheson's Cal code from Jeff
+# Silverman
+#telluricWaves = {'B': (6855, 6935), 'A': (7590, 7685)}
+telluricWaves = [(2000., 3190.), (3216., 3420.), (5500., 6050.), (6250., 6360.),
+                 (6450., 6530.), (6840., 7410.), (7560., 8410.), (8800., 9900.)]
 
 
+def fitshdr_to_wave(hdr):
+    crval = float(hdr['CRVAL1'])
+    cdelt = float(hdr['CDELT1'])
+    nlam = float(hdr['NAXIS1'])
+    lam = np.arange(crval, crval + cdelt * nlam - 1e-4, cdelt)
+    return lam
+
+from scipy import signal,ndimage, interpolate
 def mktelluric(fs=None):
+    os.chdir('work')
+    if fs is None:
+        fs = glob('sci_com.fits')
+    if len(fs) == 0:
+        print "WARNING: No flux-calibrated spectra to make the a telluric correction."
+        os.chdir('..')
+        return
+        
+    if not os.path.exists('tel'):
+        os.mkdir('tel')
+        
     # for each file
+    f = fs[0]
     # if it is a standard star combined file
-    # fit a smooth function over the telluric regions
-    # Replace the telluric with the smoothed function
-    # Divide the original and the telluric corrected spectra to
-    # get the correction factor
-    return
+    if isstdstar(f):
+        # read in the spectrum and calculate the wavelengths of the pixels
+        hdu = pyfits.open(f)
+        spec = hdu[0].data.copy()
+        hdr = hdu[0].header.copy()
+        hdu.close()
+        waves = fitshdr_to_wave(hdr)
+        
+        template_spectrum = signal.savgol_filter(spec, 21, 3)
+        noise = np.abs(spec - template_spectrum)
+        noise = ndimage.filters.gaussian_filter1d(noise, 100.0)
+        not_telluric = np.ones(spec.shape, dtype=np.bool)
+        # For each telluric region
+        for wavereg in telluricWaves:
+            in_telluric_region = np.logical_and(waves >= wavereg[0],
+                                                waves <= wavereg[1])
+            not_telluric = np.logical_and(not_telluric,
+                                             np.logical_not(in_telluric_region))
+        
+        df = pandas.DataFrame(np.array([waves[not_telluric], spec[not_telluric], noise[not_telluric]]).transpose())
+        #resample so that the gaussian process doesn't take so long
+        df = df.groupby(lambda x: x/5).mean()
+        # fit a smooth function over the telluric regions
+        X = np.atleast_2d(df[0]).T
+        weights = np.ones(len(spec))
+        weights[np.logical_not(not_telluric)] = 1e-15
+        testy = interpolate.LSQUnivariateSpline(waves, spec, waves[7:-7:7], w=weights, k=2)
+        from matplotlib import pyplot as plt
+        plt.plot(df[0],df[1])
+        plt.plot(waves,testy(waves))
+        plt.show()
+        
+        gp = GaussianProcess(corr='squared_exponential', theta0=1,
+                         thetaL=1, thetaU=1000, nugget=(df[2]/df[1])**2.0)
+#        gp = GaussianProcess(corr='cubic', theta0=1e-2, thetaL=1e-4, thetaU=1e-1,
+#                     random_start=100)
+        # Fit to data using Maximum Likelihood Estimation of the parameters
+        gp.fit(X, df[1])
+
+        temp =  ndimage.filters.gaussian_filter1d(spec, 10.0)
+        temp2 = signal.savgol_filter(spec, 21, 3)
+        testy = interpolate.LSQUnivariateSpline(waves[not_telluric], gp.predict(np.atleast_2d(waves[not_telluric]).T), waves[not_telluric][7:-7:7], k=3)
+        plt.plot(waves,temp2,'r')
+        plt.show()
+        plt.plot(waves,temp)
+        plt.show()
+        plt.plot(waves, np.abs(spec-temp))
+        plt.plot(waves, np.abs(spec-temp2))
+        plt.plot(waves,noise,'r')
+        plt.show()
+        plt.plot(df[0],gp.predict(X))
+        plt.plot(waves[np.logical_not(not_telluric)],spec[np.logical_not(not_telluric)],'r')
+        plt.show()
+        plt.plot(df[0],df[1])
+        plt.plot(waves, testy(waves))
+        plt.show()
+        x = np.atleast_2d(waves[np.logical_not(not_telluric)]).T
+        y_pred = gp.predict(x)
+        
+        plt.plot(waves, spec)
+        for wavereg in telluricWaves:
+            print(wavereg)
+            highpix = 0
+            lowpix = 0
+            #take 20 pixels before and after and fit a low order gaussian process accross them
+            where_gt = np.where(waves >= wavereg[0])[0]
+            if len(where_gt) > 0:
+                lowpix = np.min(where_gt)
+            where_lt = np.where(waves <= wavereg[1])[0]
+            if len(where_lt) > 0:
+                highpix = np.max(where_lt)
+            if highpix > 0 or lowpix > 0:
+                print(lowpix, highpix)
+                lowwave = waves[lowpix-101:lowpix]
+                highwave = waves[highpix+1: highpix + 101]
+                lowspec = spec[lowpix-101:lowpix]
+                highspec = spec[highpix+1: highpix + 101]
+                lownoise = noise[lowpix-101:lowpix]
+                highnoise = noise[highpix+1: highpix + 101]
+                
+                this_wave = np.append(lowwave,highwave)
+                this_spec = np.append(lowspec,highspec)
+                this_noise = np.append(lownoise, highnoise)
+    
+                this_gp = GaussianProcess(corr='squared_exponential', theta0=1e-2,
+                             thetaL=1e-4, thetaU=1e-1, nugget=(this_noise/this_spec)**2.0)
+                this_gp.fit(np.atleast_2d(this_wave).T, this_spec)
+                this_x = np.atleast_2d(waves[lowpix-100:highpix+101]).T
+                plt.plot(this_wave,this_spec,'g')
+                plt.plot(this_x, this_gp.predict(this_x),'r' )
+        plt.show()
+        # Replace the telluric with the smoothed function
+        smoothedspec = spec.copy()
+        smoothedspec[np.logical_not(not_telluric)] = y_pred[:]
+        # Divide the original and the telluric corrected spectra to
+        # get the correction factor
+        correction = spec/smoothedspec
+        
+        plt.plot(waves, gp.predict(np.atleast_2d(waves).T))
+        plt.plot(waves, spec)
+        plt.plot(x, y_pred,'ro')
+        plt.show()
+        # Save the correction
+        dout = np.ones((2, len(waves)))
+        dout[0] = waves
+        dout[1] = correction
+        np.savetxt('tel/telcor.dat', dout.transpose())
+            
+    os.chdir('..')
 
 
 def telluric(stdsfolder='./tel/', fs=None):
@@ -1023,8 +1138,6 @@ def telluric(stdsfolder='./tel/', fs=None):
         os.chdir('..')
         return
 
-    if not os.path.exists('tel'):
-        os.mkdir('tel')
     for f in fs:
         outfile = f.replace('final.fits')
         # Get the standard to use for telluric correction
