@@ -1,31 +1,61 @@
 #!/usr/bin/env python
 
-from pyraf import iraf
-from StdSuites.QuickDraw_Graphics_Suite import pixels
-iraf.pysalt()
-iraf.saltspec()
-iraf.saltred()
+def load_modules():
+    # Define a function to load all of the modules so that they don't' import 
+    # unless we need them
+    global iraf
+    from pyraf import iraf
+    iraf.pysalt()
+    iraf.saltspec()
+    iraf.saltred()
+    
+    global sys
+    import sys
 
-import sys
-import os
-import shutil
-from glob import glob
-import pyfits
-import numpy as np
-import lacosmicx
-from scipy import interp
-from astropy.wcs import WCS
-from scipy import optimize
-import ds9
+    global os
+    import os
 
-from sklearn.gaussian_process import GaussianProcess
-import pandas
+    global shutil
+    import shutil
 
-iraf.onedspec()
-iraf.twodspec()
-iraf.longslit()
-iraf.apextract()
-iraf.imutil()
+    global glob
+    from glob import glob
+    
+    global pyfits
+    import pyfits
+
+    global np
+    import numpy as np
+    
+    global lacosmicx
+    import lacosmicx
+    
+    global interp
+    from scipy import interp
+    
+    global interpolate
+    from scipy import interpolate
+    
+    global WCS
+    from astropy.wcs import WCS
+    
+    global optimize
+    from scipy import optimize
+    
+    global ds9
+    import ds9
+    
+    global GaussianProcess
+    from sklearn.gaussian_process import GaussianProcess
+    
+    global pandas
+    import pandas
+    
+    iraf.onedspec()
+    iraf.twodspec()
+    iraf.longslit()
+    iraf.apextract()
+    iraf.imutil()
 
 # System specific path to pysalt
 pysaltpath = '/usr/local/astro64/iraf/extern/pysalt'
@@ -33,7 +63,7 @@ pysaltpath = '/usr/local/astro64/iraf/extern/pysalt'
 # Define the stages
 allstages = ['pysalt', 'makeflats', 'flatten', 'mosaic', 'combine2d',
              'identify2d', 'rectify', 'slitnormalize', 'background', 'lax',
-             'extract', 'stdsensfunc', 'fluxscale', 'speccombine',
+             'extract', 'stdsensfunc', 'fluxcal', 'speccombine',
              'mktelluric', 'telluric']
 
 
@@ -60,8 +90,7 @@ def ds9display(filename):
     d.set('zscale')
     d.set("zscale contrast 0.1")
 
-
-def run(dostages='all', stdstar=False, interactive=False, files=None):
+def run(files=None, dostages='all', stdsfolder='./', flatfolder=None):
     # Make sure the stages parameters makes sense
     try:
         if dostages == 'all':
@@ -89,7 +118,12 @@ def run(dostages='all', stdstar=False, interactive=False, files=None):
     print(stages)
 
     for stage in stages:
-        locals()[stage](files)
+        if stage =='flatten':
+            flatten(fs=files, masterflatdir=flatfolder)
+        elif stage == 'stdsensfunc' or stage == 'telluric':
+            locals()[stage](fs=files,stdsfolder=stdsfolder)
+        else:
+            locals()[stage](fs=files)
 
 
 def pysalt(fs=None):
@@ -295,7 +329,7 @@ def makeflats(fs=None):
     os.chdir('..')
 
 
-def flatten(fs=None):
+def flatten(fs=None, masterflatdir=None):
     os.chdir('work')
     if fs is None:
         fs = glob('pysalt/bxgpP*.fits')
@@ -317,10 +351,20 @@ def flatten(fs=None):
     for i, f in enumerate(ims):
         thishdu = pyfits.open(f)
         ga = gas[i]
+        flatfile = 'flats/flt%0.2fresc%i.fits' % (ga, c)
+        if len(glob(flatfile)) == 0:
+               if masterflatdir is None:
+                   continue
+               # Check for the master flat directory
+               flatfile = masterflatdir+'/flats/flt%0.2fresc%i.fits' % (ga, c)
+               if len(glob(flatfile)) == 0:
+                   # Still can't find one? Abort!!
+                   print("No flat field image found for %s"% f)
+                   continue
         # For each chip
         for c in range(1, 7):
             # open the corresponding response file
-            resphdu = pyfits.open('flats/flt%0.2fresc%i.fits' % (ga, c))
+            resphdu = pyfits.open(flatfile)
             # divide out the illumination correction and the flatfield
             # make sure divzero = 0.0
             thishdu[c].data /= resphdu[0].data.copy()
@@ -691,7 +735,7 @@ def fixpix(fs=None):
     os.chdir('..')
 
 
-def extract(fs=None, interactive=True):
+def extract(fs=None):
     os.chdir('work')
     if fs is None:
         fs = glob('fix/*fix*.fits')
@@ -711,8 +755,7 @@ def extract(fs=None, interactive=True):
         # get this from the header
         readnoise = 5
         # If interactive open the rectified, background subtracted image in ds9
-        if interactive:
-            ds9display(f.replace('fix', 'bkg'))
+        ds9display(f.replace('fix', 'bkg'))
         # set dispaxis = 1 just in case
         pyfits.setval(f, 'DISPAXIS', extname='SCI', value=1)
         iraf.unlearn(iraf.apall)
@@ -852,7 +895,7 @@ def stdsensfunc(fs=None):
     os.chdir('..')
 
 
-def fluxcal(stdsfolder='./std', fs=None):
+def fluxcal(stdsfolder='./', fs=None):
     os.chdir('work')
     if fs is None:
         fs = glob('x1d/sci*x1d*c*.fits')
@@ -864,7 +907,7 @@ def fluxcal(stdsfolder='./std', fs=None):
     if not os.path.exists('flx'):
         os.mkdir('flx')
     extfile = pysaltpath + '/data/site/suth_extinct.dat'
-    stdfiles = glob(stdsfolder + '/*sens*c?.dat')
+    stdfiles = glob(stdsfolder + '/std/*sens*c?.dat')
     for f in fs:
         outfile = f.replace('x1d', 'flx')
         chip = outfile[-6]
@@ -929,11 +972,17 @@ def combine_spec_chi2(p, lam, specs, specerrs):
     return chi
 
 
-def speccombine():
+def speccombine(fs=None):
     os.chdir('work')
+    if fs is None:
+        fs = glob('flx/sci*c?.fits')
+    if len(fs)==0:
+        print("No flux calibrated images to combine.")
+        return
+    
     nsteps = 8001
     lamgrid = np.linspace(2000.0, 10000.0, nsteps)
-    fs = glob('flx/sci*c?.fits')
+
     nfs = len(fs)
     # for each aperture
     # get all of the science images
@@ -1002,7 +1051,7 @@ def fitshdr_to_wave(hdr):
     lam = np.arange(crval, crval + cdelt * nlam - 1e-4, cdelt)
     return lam
 
-from scipy import signal,ndimage, interpolate
+
 def mktelluric(fs=None):
     os.chdir('work')
     if fs is None:
@@ -1037,89 +1086,23 @@ def mktelluric(fs=None):
             not_telluric = np.logical_and(not_telluric,
                                              np.logical_not(in_telluric_region))
         
-        df = pandas.DataFrame(np.array([waves[not_telluric], spec[not_telluric], noise[not_telluric]]).transpose())
-        #resample so that the gaussian process doesn't take so long
-        df = df.groupby(lambda x: x/5).mean()
-        # fit a smooth function over the telluric regions
-        X = np.atleast_2d(df[0]).T
-        weights = np.ones(len(spec))
-        weights[np.logical_not(not_telluric)] = 1e-15
-        testy = interpolate.LSQUnivariateSpline(waves, spec, waves[7:-7:7], w=weights, k=2)
-        from matplotlib import pyplot as plt
-        plt.plot(df[0],df[1])
-        plt.plot(waves,testy(waves))
-        plt.show()
-        
-        gp = GaussianProcess(corr='squared_exponential', theta0=1,
-                         thetaL=1, thetaU=1000, nugget=(df[2]/df[1])**2.0)
-#        gp = GaussianProcess(corr='cubic', theta0=1e-2, thetaL=1e-4, thetaU=1e-1,
-#                     random_start=100)
-        # Fit to data using Maximum Likelihood Estimation of the parameters
-        gp.fit(X, df[1])
+        # Smooth the spectrum so that the spline doesn't go as crazy
+        # Use the Savitzky-Golay filter to presevere the edges of the
+        # absorption features (both atomospheric and intrinsic to the star)
+        sgspec = signal.savgol_filter(spec, 31, 3)
+        #Get the number of data points to set the smoothing criteria for the 
+        # spline
+        m = not_telluric.sum()
+        intpr = interpolate.splrep(waves[not_telluric], sgspec[not_telluric], 
+                                   w = 1/noise[not_telluric], k=2,  s=10 * m)
 
-        temp =  ndimage.filters.gaussian_filter1d(spec, 10.0)
-        temp2 = signal.savgol_filter(spec, 21, 3)
-        testy = interpolate.LSQUnivariateSpline(waves[not_telluric], gp.predict(np.atleast_2d(waves[not_telluric]).T), waves[not_telluric][7:-7:7], k=3)
-        plt.plot(waves,temp2,'r')
-        plt.show()
-        plt.plot(waves,temp)
-        plt.show()
-        plt.plot(waves, np.abs(spec-temp))
-        plt.plot(waves, np.abs(spec-temp2))
-        plt.plot(waves,noise,'r')
-        plt.show()
-        plt.plot(df[0],gp.predict(X))
-        plt.plot(waves[np.logical_not(not_telluric)],spec[np.logical_not(not_telluric)],'r')
-        plt.show()
-        plt.plot(df[0],df[1])
-        plt.plot(waves, testy(waves))
-        plt.show()
-        x = np.atleast_2d(waves[np.logical_not(not_telluric)]).T
-        y_pred = gp.predict(x)
-        
-        plt.plot(waves, spec)
-        for wavereg in telluricWaves:
-            print(wavereg)
-            highpix = 0
-            lowpix = 0
-            #take 20 pixels before and after and fit a low order gaussian process accross them
-            where_gt = np.where(waves >= wavereg[0])[0]
-            if len(where_gt) > 0:
-                lowpix = np.min(where_gt)
-            where_lt = np.where(waves <= wavereg[1])[0]
-            if len(where_lt) > 0:
-                highpix = np.max(where_lt)
-            if highpix > 0 or lowpix > 0:
-                print(lowpix, highpix)
-                lowwave = waves[lowpix-101:lowpix]
-                highwave = waves[highpix+1: highpix + 101]
-                lowspec = spec[lowpix-101:lowpix]
-                highspec = spec[highpix+1: highpix + 101]
-                lownoise = noise[lowpix-101:lowpix]
-                highnoise = noise[highpix+1: highpix + 101]
-                
-                this_wave = np.append(lowwave,highwave)
-                this_spec = np.append(lowspec,highspec)
-                this_noise = np.append(lownoise, highnoise)
-    
-                this_gp = GaussianProcess(corr='squared_exponential', theta0=1e-2,
-                             thetaL=1e-4, thetaU=1e-1, nugget=(this_noise/this_spec)**2.0)
-                this_gp.fit(np.atleast_2d(this_wave).T, this_spec)
-                this_x = np.atleast_2d(waves[lowpix-100:highpix+101]).T
-                plt.plot(this_wave,this_spec,'g')
-                plt.plot(this_x, this_gp.predict(this_x),'r' )
-        plt.show()
-        # Replace the telluric with the smoothed function
-        smoothedspec = spec.copy()
-        smoothedspec[np.logical_not(not_telluric)] = y_pred[:]
+         # Replace the telluric with the smoothed function
+        smoothedspec = interpolate.splev(waves, intpr)
+        smoothedspec[not_telluric] = spec[not_telluric]
         # Divide the original and the telluric corrected spectra to
         # get the correction factor
-        correction = spec/smoothedspec
-        
-        plt.plot(waves, gp.predict(np.atleast_2d(waves).T))
-        plt.plot(waves, spec)
-        plt.plot(x, y_pred,'ro')
-        plt.show()
+        correction = spec / smoothedspec
+
         # Save the correction
         dout = np.ones((2, len(waves)))
         dout[0] = waves
@@ -1129,10 +1112,10 @@ def mktelluric(fs=None):
     os.chdir('..')
 
 
-def telluric(stdsfolder='./tel/', fs=None):
+def telluric(stdsfolder='./', fs=None):
     os.chdir('work')
     if fs is None:
-        fs = glob('sci.fits')
+        fs = glob('sci_com.fits')
     if len(fs) == 0:
         print "WARNING: No flux-calibrated spectra to telluric-correct."
         os.chdir('..')
@@ -1141,23 +1124,68 @@ def telluric(stdsfolder='./tel/', fs=None):
     for f in fs:
         outfile = f.replace('final.fits')
         # Get the standard to use for telluric correction
-        stdfile = glob(stdsfolder + '/*.fits')[0]
-
-        # Loop over the telluric regions? Maybe don't even need a loop
+        stdfile = glob(stdsfolder + '/tel/telcor.dat')[0]
+        
+        hdu = pyfits.open(f)
+        spec = hdu[0].data.copy()
+        hdr = hdu[0].header.copy()
+        hdu.close()
+        waves = fitshdr_to_wave(hdr)
+        
+        telwave, telspec = np.genfromtxt(stdfile).transpose()
         # Cross-correlate the standard star and the sci spectra
         # to find wavelength shift of standard star.
-        # Scale, shift, and stretch standard star spectrum to match science
+        p = fitxcor(waves, spec, telwave, telspec)
+        # shift and stretch standard star spectrum to match science
         # spectrum.
+        telcorr = interp(waves, p[0] * telwave + p[1], telspec)
+        # In principle, we should scale by the proper airmasses, but SALT
+        # always observes at ~same airmass
+        
         # Divide science spectrum by transformed standard star sub-spectrum
+        correct_spec = spec / telcorr
         # Copy telluric-corrected data to new file.
+        tofits(outfile, correct_spec, hdr=hdr)
+    os.chdir('..')
+
+def ncor(x, y):
+    """Calculate the normalized correlation of two arrays"""
+    d = np.correlate(x, x) * np.correlate(y, y)
+    if d <= 0:
+        return 0
+    return np.correlate(x, y) / d ** 0.5
+
+def xcorfun(p, warr, farr, telwarr, telfarr):
+    # Telluric wavelengths and flux
+    # Observed wavelengths and flux
+    # resample the telluric spectrum at the same wavelengths as the observed
+    # spectrum
+    #Make the artifical spectrum to cross correlate
+    asfarr = interp( warr, p[0]*telwarr  + p[1], telfarr, left=1.0,right=1.0)
+    return abs(1.0 / ncor(farr, asfarr))
+
+
+def fitxcor(warr, farr, telwarr, telfarr):
+    """Maximize the normalized cross correlation coefficient for the telluric
+    correction
+    """
+    res = optimize.minimize(xcorfun, [1.0,0.0], method='Nelder-Mead',
+                   args=(warr, farr, telwarr, telfarr))
+
+    return res['x']
 
 
 if __name__ == '__main__':
     # Parse the input arguments.
     import argparse
-    parser = argparse.ArgumentParser(description='Reduce long-slit RSS SALT data.')
-    parser.add_argument('stdfolder', metavar='stdfolder', default='std',
+    parser = argparse.ArgumentParser(description='Reduce long-slit RSS SALT data. Available stages are %s.' % allstages)
+    parser.add_argument('--files', default=None, metavar='files', help='Files to work on.')
+    parser.add_argument('--stages', default='all', metavar='stages', help='Stages to run. Can be "all", a comma separated list, or a range delineated by a "-".')
+    parser.add_argument('--stdfolder', metavar='stdfolder', default='./std/',
                help='Path to the standard star file folder to use for flux calibration and telluric correction.')
+    parser.add_argument('--flatfolder', metavar='flatfolder', default=None,
+               help='Path to the file folder with previous flat fields to use if we did not obtain new flats.')
     args = parser.parse_args()
-    run(args.stdfolder)
+    load_modules()
+    run(files=args.files, dostages=args.stages, stdsfolder=args.stdfolder, flatfolder=args.flatfolder)
     sys.exit("Thanks for using this pipeline!")
