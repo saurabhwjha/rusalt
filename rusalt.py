@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import sys
 
 def load_modules():
     # Define a function to load all of the modules so that they don't' import 
@@ -8,6 +9,7 @@ def load_modules():
     iraf.pysalt()
     iraf.saltspec()
     iraf.saltred()
+    iraf.set(clobber='yes')
     
     global sys
     import sys
@@ -32,6 +34,12 @@ def load_modules():
     
     global interp
     from scipy import interp
+    
+    global signal
+    from scipy import signal
+    
+    global ndimage
+    from scipy import ndimage
     
     global interpolate
     from scipy import interpolate
@@ -61,9 +69,9 @@ def load_modules():
 pysaltpath = '/usr/local/astro64/iraf/extern/pysalt'
 
 # Define the stages
-allstages = ['pysalt', 'makeflats', 'flatten', 'mosaic', 'combine2d',
-             'identify2d', 'rectify', 'slitnormalize', 'background', 'lax',
-             'extract', 'stdsensfunc', 'fluxcal', 'speccombine',
+allstages = ['pysalt', 'makeflats', 'flatten', 'mosaic',
+             'identify2d', 'rectify', 'slitnormalize', 'background', 'lax', 'fixpix',
+             'extract', 'split1d','stdsensfunc', 'fluxcal', 'speccombine',
              'mktelluric', 'telluric']
 
 
@@ -91,6 +99,9 @@ def ds9display(filename):
     d.set("zscale contrast 0.1")
 
 def run(files=None, dostages='all', stdsfolder='./', flatfolder=None):
+    # Load the modules if they aren't already.
+    if not 'iraf' in sys.modules:
+        load_modules()
     # Make sure the stages parameters makes sense
     try:
         if dostages == 'all':
@@ -120,10 +131,10 @@ def run(files=None, dostages='all', stdsfolder='./', flatfolder=None):
     for stage in stages:
         if stage =='flatten':
             flatten(fs=files, masterflatdir=flatfolder)
-        elif stage == 'stdsensfunc' or stage == 'telluric':
-            locals()[stage](fs=files,stdsfolder=stdsfolder)
+        elif stage == 'fluxcal' or stage == 'telluric':
+            globals()[stage](fs=files,stdsfolder=stdsfolder)
         else:
-            locals()[stage](fs=files)
+            globals()[stage](fs=files)
 
 
 def pysalt(fs=None):
@@ -142,7 +153,7 @@ def pysalt(fs=None):
     for f in fs:
         shutil.copy(f, 'raw/')
         shutil.move(f, 'work/')
-    os.chdir('work')
+    iraf.cd('work')
 
     # Run each of the pysalt pipeline steps deleting temporary files as we go
     # saltprepare
@@ -187,7 +198,7 @@ def pysalt(fs=None):
         os.mkdir('pysalt')
     for f in glob('bxgpP*.fits'):
         shutil.move(f, 'pysalt')
-    os.chdir('..')
+    iraf.cd('..')
 
     # Hold off on the the mosaic step for now. We want to do some processing on
     # the individual chips
@@ -217,13 +228,13 @@ def makeflats(fs=None):
     # Note the list of files need to not include any paths relative to
     # the work directory.
     # Maybe not the greatest convention, but we can update this later
-    os.chdir('work')
+    iraf.cd('work')
     if fs is None:
         fs = glob('pysalt/bxgp*.fits')
     if len(fs) == 0:
         print "WARNING: No flat-fields to combine and normalize."
         # Fail gracefully by going up a directory
-        os.chdir('..')
+        iraf.cd('..')
         return
     # make a flats directory
     if not os.path.exists('flats'):
@@ -253,7 +264,7 @@ def makeflats(fs=None):
                 os.remove(combineoutname)
             # initialize the iraf command
             iraf.unlearn(iraf.imcombine)
-
+            print(flatlist)
             # don't forget to remove the last comma in the filelist
             iraf.imcombine(input=flatlist[:-1], output=combineoutname,
                            combine='average', reject='sigclip', lsigma=3.0,
@@ -326,17 +337,17 @@ def makeflats(fs=None):
             flathdu.flush()
             flathdu.close()
     # Step back up to the top directory
-    os.chdir('..')
+    iraf.cd('..')
 
 
 def flatten(fs=None, masterflatdir=None):
-    os.chdir('work')
+    iraf.cd('work')
     if fs is None:
         fs = glob('pysalt/bxgpP*.fits')
     if len(fs) == 0:
         print "WARNING: No images to flat-field."
         # Change directories to fail more gracefully
-        os.chdir('..')
+        iraf.cd('..')
         return
     if not os.path.exists('flts'):
         os.mkdir('flts')
@@ -351,18 +362,19 @@ def flatten(fs=None, masterflatdir=None):
     for i, f in enumerate(ims):
         thishdu = pyfits.open(f)
         ga = gas[i]
-        flatfile = 'flats/flt%0.2fresc%i.fits' % (ga, c)
-        if len(glob(flatfile)) == 0:
-               if masterflatdir is None:
-                   continue
-               # Check for the master flat directory
-               flatfile = masterflatdir+'/flats/flt%0.2fresc%i.fits' % (ga, c)
-               if len(glob(flatfile)) == 0:
-                   # Still can't find one? Abort!!
-                   print("No flat field image found for %s"% f)
-                   continue
         # For each chip
         for c in range(1, 7):
+            flatfile = 'flats/flt%0.2fresc%i.fits' % (ga, c)
+            if len(glob(flatfile)) == 0:
+                   if masterflatdir is None:
+                       continue
+                   # Check for the master flat directory
+                   flatfile = masterflatdir+'/flats/flt%0.2fresc%i.fits' % (ga, c)
+                   if len(glob(flatfile)) == 0:
+                       # Still can't find one? Abort!!
+                       print("No flat field image found for %s"% f)
+                       continue
+
             # open the corresponding response file
             resphdu = pyfits.open(flatfile)
             # divide out the illumination correction and the flatfield
@@ -386,19 +398,19 @@ def flatten(fs=None, masterflatdir=None):
         thishdu.writeto(outname)
         thishdu.close()
 
-    os.chdir('..')
+    iraf.cd('..')
 
 
 def mosaic(fs=None):
 
-    os.chdir('work')
+    iraf.cd('work')
     # If the file list is not given, grab the default files
     if fs is None:
         fs = glob('flts/*.fits')
     # Abort if there are no files
     if len(fs) == 0:
         print "WARNING: No flat-fielded images to mosaic."
-        os.chdir('..')
+        iraf.cd('..')
         return
 
     if not os.path.exists('mos'):
@@ -437,17 +449,17 @@ def mosaic(fs=None):
         h.flush()
         h.close()
 
-    os.chdir('..')
+    iraf.cd('..')
 
 
 def identify2d(fs=None):
-    os.chdir('work')
+    iraf.cd('work')
     if fs is None:
-        fs = glob('nrm/arc*nrm*.fits')
+        fs = glob('mos/arc*mos*.fits')
     if len(fs) == 0:
-        print "WARNING: No slit normalized arcs for (2D) specidentify."
+        print "WARNING: No mosaiced (2D) specidentify."
         # Change directories to fail gracefully
-        os.chdir('..')
+        iraf.cd('..')
         return
     arcfs, arcgas = get_ims(fs, 'arc')
     if not os.path.exists('id2'):
@@ -473,11 +485,13 @@ def identify2d(fs=None):
         iraf.unlearn(iraf.specidentify)
         iraf.flpr()
         iraf.specidentify(images=f, linelist=lamplines, outfile=idfile,
-                          guesstype='rss', inter=True, rstep=600 / ccdsum,
+                          guesstype='rss', inter=True, # automethod='FitXcor',
+                          rstep=600 / ccdsum,
                           rstart=200 / ccdsum, startext=1, clobber='yes',
-                          verbose='yes', mode='hl', logfile='salt.log',
+                          #startext=1, clobber='yes',
+                          verbose='no', mode='hl', logfile='salt.log',
                           mdiff=2, function='legendre')
-    os.chdir('..')
+    iraf.cd('..')
 
 
 def get_chipgaps(hdu):
@@ -507,18 +521,18 @@ def get_chipgaps(hdu):
 
 
 def rectify(ids=None, fs=None):
-    os.chdir('work')
+    iraf.cd('work')
     if ids is None:
         ids = np.array(glob('id2/arc*id2*.db'))
     if fs is None:
         fs = glob('mos/*mos*.fits')
     if len(ids) == 0:
         print "WARNING: No wavelength solutions for rectification."
-        os.chdir('..')
+        iraf.cd('..')
         return
     if len(fs) == 0:
         print "WARNING: No images for rectification."
-        os.chdir('..')
+        iraf.cd('..')
         return
 
     # Get the grating angles of the solution files
@@ -568,17 +582,17 @@ def rectify(ids=None, fs=None):
         h[1].data[h[2].data == 1] = 0.0
         h.flush()
         h.close()
-    os.chdir('..')
+    iraf.cd('..')
 
 
 def slitnormalize(fs=None):
-    os.chdir('work')
+    iraf.cd('work')
     if fs is None:
         fs = glob('rec/*rec*.fits')
     if len(fs) == 0:
-        print "WARNING: No mosaiced files for slitnormalize."
+        print "WARNING: No rectified files for slitnormalize."
         # Change directories to fail gracefully
-        os.chdir('..')
+        iraf.cd('..')
         return
     if not os.path.exists('nrm'):
         os.mkdir('nrm')
@@ -589,17 +603,17 @@ def slitnormalize(fs=None):
         iraf.specslitnormalize(images=f, outimages=outname, outpref='',
                                order=5, clobber=True, mode='h')
 
-    os.chdir('..')
+    iraf.cd('..')
 
 
 def background(fs=None):
-    os.chdir('work')
+    iraf.cd('work')
     # Get rectified science images
     if fs is None:
         fs = glob('nrm/sci*nrm*.fits')
     if len(fs) == 0:
         print "WARNING: No rectified images for background-subtraction."
-        os.chdir('..')
+        iraf.cd('..')
         return
 
     if not os.path.exists('bkg'):
@@ -642,16 +656,16 @@ def background(fs=None):
         hdu.writeto(outfile, clobber=True)  # saving the updated file
         # (data changed)
         os.remove('tmpbkg.fits')
-    os.chdir('..')
+    iraf.cd('..')
 
 
 def lax(fs=None):
-    os.chdir('work')
+    iraf.cd('work')
     if fs is None:
         fs = glob('bkg/*bkg*.fits')
     if len(fs) == 0:
         print "WARNING: No background-subtracted files for Lacosmicx."
-        os.chdir('..')
+        iraf.cd('..')
         return
 
     if not os.path.exists('lax'):
@@ -678,36 +692,30 @@ def lax(fs=None):
             # Gain = 1, readnoise should be small so it shouldn't matter much.
             # Default value seems to work.
             chipinds = slice(chipedges[chip][0], chipedges[chip][1])
-            lacosmicx.run(inmat=hdu[1].data[:, chipinds],
-                          inmask=hdu[2].data[:, chipinds],
-                          outmaskfile='tmpmsk.fits', sigclip=4.0, objlim=1.0,
-                          sigfrac=0.1, gain=1.0, pssl=0.0, robust=False)
+            crmask, _cleanarr = lacosmicx.lacosmicx(hdu[1].data[:, chipinds].copy(),
+                          inmask=np.asarray(hdu[2].data[:, chipinds].copy(), dtype = np.uint8), sigclip=4.0,
+                          objlim=1.0, sigfrac=0.1, gain=1.0, pssl=0.0)
 
-            # Open the cr mask file
-            maskhdu = pyfits.open('tmpmsk.fits')
 
             # Update the image
-            hdu['CRM'].data[:, chipinds][:, :] = maskhdu[0].data[:, :]
+            hdu['CRM'].data[:, chipinds][:, :] = crmask[:,:]
             # Flag the cosmic ray pixels with a large negative number
-            hdu['SCI'].data[:, chipinds][maskhdu[0].data == 1] = -1000000
-
-            # clean up
-            os.remove('tmpmsk.fits')
+            hdu['SCI'].data[:, chipinds][crmask == 1] = -1000000
 
         # Save the file
         hdu.writeto(outname, clobber=True)
         hdu.close()
 
-    os.chdir('..')
+    iraf.cd('..')
 
 
 def fixpix(fs=None):
-    os.chdir('work')
+    iraf.cd('work')
     if fs is None:
         fs = glob('nrm/sci*nrm*.fits')
     if len(fs) == 0:
         print "WARNING: No rectified images to fix."
-        os.chdir('..')
+        iraf.cd('..')
         return
     if not os.path.exists('fix'):
         os.mkdir('fix')
@@ -717,7 +725,7 @@ def fixpix(fs=None):
         shutil.copy(f, outname)
         # Set all of the BPM pixels = 0
         h = pyfits.open(outname, mode='update')
-        h['SCI'].data[h['BPM'] == 1] = 0
+        h['SCI'].data[h['BPM'].data == 1] = 0
         # Grab the CRM extension from the lax file
         laxhdu = pyfits.open(f.replace('nrm', 'lax'))
         h.append(pyfits.ImageHDU(data=laxhdu['CRM'].data.copy(),
@@ -732,16 +740,16 @@ def fixpix(fs=None):
         iraf.unlearn(iraf.fixpix)
         iraf.flpr()
         iraf.fixpix(outname + '[SCI]', outname + '[CRM]', mode='hl')
-    os.chdir('..')
+    iraf.cd('..')
 
 
 def extract(fs=None):
-    os.chdir('work')
+    iraf.cd('work')
     if fs is None:
         fs = glob('fix/*fix*.fits')
     if len(fs) == 0:
         print "WARNING: No fixpixed images available for extraction."
-        os.chdir('..')
+        iraf.cd('..')
         return
 
     if not os.path.exists('x1d'):
@@ -804,16 +812,16 @@ def extract(fs=None):
                       value=pyfits.getval(f, r'AIRMASS'))
         pyfits.setval(outbase + '.fits', 'EXPTIME',
                       value=pyfits.getval(f, 'EXPTIME'))
-    os.chdir('..')
+    iraf.cd('..')
 
 
 def split1d(fs=None):
-    os.chdir('work')
+    iraf.cd('work')
     if fs is None:
         fs = glob('x1d/sci*x1d*.fits')
     if len(fs) == 0:
         print "WARNING: No extracted spectra to split."
-        os.chdir('..')
+        iraf.cd('..')
         return
 
     for f in fs:
@@ -832,7 +840,7 @@ def split1d(fs=None):
             iraf.scopy(f, f[:-5] + 'c%i' % (i + 1), w1=lam[0], w2=lam[1],
                        format='multispec', rebin='no')
         hdu.close()
-    os.chdir('..')
+    iraf.cd('..')
 
 
 def isstdstar(f):
@@ -860,12 +868,12 @@ def spectoascii(fname, asciiname, ap=0):
 
 
 def stdsensfunc(fs=None):
-    os.chdir('work')
+    iraf.cd('work')
     if fs is None:
         fs = glob('x1d/sci*x1d*c?.fits')
     if len(fs) == 0:
         print "WARNING: No extracted spectra to create sensfuncs from."
-        os.chdir('..')
+        iraf.cd('..')
         return
 
     if not os.path.exists('std'):
@@ -892,22 +900,23 @@ def stdsensfunc(fs=None):
                           order=11, clobber=True, mode='h', thresh=1e10)
             # delete the ascii file
             os.remove(asciispec)
-    os.chdir('..')
+    iraf.cd('..')
 
 
 def fluxcal(stdsfolder='./', fs=None):
-    os.chdir('work')
+    iraf.cd('work')
     if fs is None:
         fs = glob('x1d/sci*x1d*c*.fits')
     if len(fs) == 0:
         print "WARNING: No science chip spectra to flux calibrate."
-        os.chdir('..')
+        iraf.cd('..')
         return
 
     if not os.path.exists('flx'):
         os.mkdir('flx')
     extfile = pysaltpath + '/data/site/suth_extinct.dat'
     stdfiles = glob(stdsfolder + '/std/*sens*c?.dat')
+    print(stdfiles)
     for f in fs:
         outfile = f.replace('x1d', 'flx')
         chip = outfile[-6]
@@ -946,7 +955,7 @@ def fluxcal(stdsfolder='./', fs=None):
             os.remove(asciiname)
             os.remove(outtmpname)
         hdu.writeto(outfile, clobber=True)
-    os.chdir('..')
+    iraf.cd('..')
 
 
 def combine_spec_chi2(p, lam, specs, specerrs):
@@ -973,11 +982,12 @@ def combine_spec_chi2(p, lam, specs, specerrs):
 
 
 def speccombine(fs=None):
-    os.chdir('work')
+    iraf.cd('work')
     if fs is None:
         fs = glob('flx/sci*c?.fits')
     if len(fs)==0:
         print("No flux calibrated images to combine.")
+        iraf.cd('..')
         return
     
     nsteps = 8001
@@ -1032,7 +1042,7 @@ def speccombine(fs=None):
                   reject='avsigclip', lthreshold=1e-19)
     # Remove the other apertures
     # remove the sky and arc bands from the combined spectra.
-    os.chdir('..')
+    iraf.cd('..')
     return specs
 
 
@@ -1053,12 +1063,12 @@ def fitshdr_to_wave(hdr):
 
 
 def mktelluric(fs=None):
-    os.chdir('work')
+    iraf.cd('work')
     if fs is None:
         fs = glob('sci_com.fits')
     if len(fs) == 0:
         print "WARNING: No flux-calibrated spectra to make the a telluric correction."
-        os.chdir('..')
+        iraf.cd('..')
         return
         
     if not os.path.exists('tel'):
@@ -1109,44 +1119,44 @@ def mktelluric(fs=None):
         dout[1] = correction
         np.savetxt('tel/telcor.dat', dout.transpose())
             
-    os.chdir('..')
+    iraf.cd('..')
 
 
 def telluric(stdsfolder='./', fs=None):
-    os.chdir('work')
+    iraf.cd('work')
     if fs is None:
         fs = glob('sci_com.fits')
     if len(fs) == 0:
         print "WARNING: No flux-calibrated spectra to telluric-correct."
-        os.chdir('..')
+        iraf.cd('..')
         return
 
-    for f in fs:
-        outfile = f.replace('final.fits')
-        # Get the standard to use for telluric correction
-        stdfile = glob(stdsfolder + '/tel/telcor.dat')[0]
-        
-        hdu = pyfits.open(f)
-        spec = hdu[0].data.copy()
-        hdr = hdu[0].header.copy()
-        hdu.close()
-        waves = fitshdr_to_wave(hdr)
-        
-        telwave, telspec = np.genfromtxt(stdfile).transpose()
-        # Cross-correlate the standard star and the sci spectra
-        # to find wavelength shift of standard star.
-        p = fitxcor(waves, spec, telwave, telspec)
-        # shift and stretch standard star spectrum to match science
-        # spectrum.
-        telcorr = interp(waves, p[0] * telwave + p[1], telspec)
-        # In principle, we should scale by the proper airmasses, but SALT
-        # always observes at ~same airmass
-        
-        # Divide science spectrum by transformed standard star sub-spectrum
-        correct_spec = spec / telcorr
-        # Copy telluric-corrected data to new file.
-        tofits(outfile, correct_spec, hdr=hdr)
-    os.chdir('..')
+    f = fs[0]
+    outfile = 'final.fits'
+    # Get the standard to use for telluric correction
+    stdfile = glob(stdsfolder + '/tel/telcor.dat')[0]
+    
+    hdu = pyfits.open(f)
+    spec = hdu[0].data.copy()
+    hdr = hdu[0].header.copy()
+    hdu.close()
+    waves = fitshdr_to_wave(hdr)
+    
+    telwave, telspec = np.genfromtxt(stdfile).transpose()
+    # Cross-correlate the standard star and the sci spectra
+    # to find wavelength shift of standard star.
+    p = fitxcor(waves, spec, telwave, telspec)
+    # shift and stretch standard star spectrum to match science
+    # spectrum.
+    telcorr = interp(waves, p[0] * telwave + p[1], telspec)
+    # In principle, we should scale by the proper airmasses, but SALT
+    # always observes at ~same airmass
+    
+    # Divide science spectrum by transformed standard star sub-spectrum
+    correct_spec = spec / telcorr
+    # Copy telluric-corrected data to new file.
+    tofits(outfile, correct_spec, hdr=hdr)
+    iraf.cd('..')
 
 def ncor(x, y):
     """Calculate the normalized correlation of two arrays"""
@@ -1181,7 +1191,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Reduce long-slit RSS SALT data. Available stages are %s.' % allstages)
     parser.add_argument('--files', default=None, metavar='files', help='Files to work on.')
     parser.add_argument('--stages', default='all', metavar='stages', help='Stages to run. Can be "all", a comma separated list, or a range delineated by a "-".')
-    parser.add_argument('--stdfolder', metavar='stdfolder', default='./std/',
+    parser.add_argument('--stdfolder', metavar='stdfolder', default='./',
                help='Path to the standard star file folder to use for flux calibration and telluric correction.')
     parser.add_argument('--flatfolder', metavar='flatfolder', default=None,
                help='Path to the file folder with previous flat fields to use if we did not obtain new flats.')
