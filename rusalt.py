@@ -370,7 +370,7 @@ def flatten(fs=None, masterflatdir=None):
                        print("No flat field image found for %s"% f)
                        continue
                    # Check for the master flat directory
-                   flatfile = masterflatdir+'/flats/flt%0.2fresc%i.fits' % (ga, c)
+                   flatfile = masterflatdir+'/flt%0.2fresc%i.fits' % (ga, c)
                    if len(glob(flatfile)) == 0:
                        # Still can't find one? Abort!!
                        print("No flat field image found for %s"% f)
