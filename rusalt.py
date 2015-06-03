@@ -9,7 +9,7 @@ def load_modules():
     iraf.pysalt()
     iraf.saltspec()
     iraf.saltred()
-    iraf.set(clobber='yes')
+    iraf.set(clobber='YES')
     
     global sys
     import sys
@@ -1032,7 +1032,7 @@ def speccombine(fs=None):
     # write the best fit results into a file
     lines = []
     for p in results['x']:
-        lines.append('%f\n' % p)
+        lines.append('%f\n' % (1.0 / p))
     f = open('flx/scales.dat', 'w')
     f.writelines(lines)
     f.close()
