@@ -827,7 +827,7 @@ def extract(fs=None):
 def split1d(fs=None):
     iraf.cd('work')
     if fs is None:
-        fs = glob('x1d/sci*x1d*.fits')
+        fs = glob('x1d/sci*x1d???.fits')
     if len(fs) == 0:
         print "WARNING: No extracted spectra to split."
         iraf.cd('..')
@@ -847,7 +847,7 @@ def split1d(fs=None):
             # get the wavelengths that correspond to each chip
             lam, _apnum, _bandnum = w.all_pix2world(chipedges[i], 0, 0, 0)
             iraf.scopy(f, f[:-5] + 'c%i' % (i + 1), w1=lam[0], w2=lam[1],
-                       format='multispec', rebin='no')
+                       format='multispec', rebin='no',clobber='yes')
         hdu.close()
     iraf.cd('..')
 
