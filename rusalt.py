@@ -391,10 +391,10 @@ def flatten(fs=None, masterflatdir=None):
         else:
             typestr = 'arc'
         # get the image number
-        # by salt naming convention, these should be the last 3 characters
+        # by salt naming convention, these should be the last 4 characters
         # before the '.fits'
-        imnum = f[-8:-5]
-        outname = 'flts/' + typestr + '%0.2fflt%03i.fits' % (float(ga),
+        imnum = f[-9:-5]
+        outname = 'flts/' + typestr + '%0.2fflt%04i.fits' % (float(ga),
                                                              int(imnum))
         thishdu.writeto(outname)
         thishdu.close()
@@ -424,11 +424,11 @@ def mosaic(fs=None):
         ga = gas[i]
         fname = f.split('/')[1]
         typestr = fname[:3]
-        # by our naming convention, imnum should be the last 3 characters
+        # by our naming convention, imnum should be the last 4 characters
         # before the '.fits'
-        imnum = fname[-8:-5]
+        imnum = fname[-9:-5]
         outname = 'mos/' + typestr
-        outname += '%0.2fmos%03i.fits' % (float(ga), int(imnum))
+        outname += '%0.2fmos%04i.fits' % (float(ga), int(imnum))
         # prepare to run saltmosaic
         iraf.unlearn(iraf.saltmosaic)
         iraf.flpr()
@@ -480,9 +480,9 @@ def identify2d(fs=None):
         lamplines = pysaltpath + '/data/linelists/' + lampfiles[lamp]
 
         # img num should be right before the .fits
-        imgnum = f[-8:-5]
+        imgnum = f[-9:-5]
         # run pysalt specidentify
-        idfile = 'id2/arc%0.2fid2%03i' % (float(ga), int(imgnum)) + '.db'
+        idfile = 'id2/arc%0.2fid2%04i' % (float(ga), int(imgnum)) + '.db'
         iraf.unlearn(iraf.specidentify)
         iraf.flpr()
         iraf.specidentify(images=f, linelist=lamplines, outfile=idfile,
@@ -501,11 +501,12 @@ def get_chipgaps(hdu):
         # get the BPM from 51-950 which are the nominally good pixels
         # (for binning = 4 in the y direction)
         # (the default wavelength solutions are from 50.5 - 950.5)
+        # [swj CHANGED this to use rows 250-750 to avoid potential bad rows]
         # Note this throws away one extra pixel on either side but it seems to
         # be necessary.
         ccdsum = int(hdu[0].header['CCDSUM'].split()[1])
 
-        #ypix = slice(200 / ccdsum + 1, 3800 / ccdsum)
+        #ypix = slice(200 / ccdsum + 1, 3800 / ccdsum)  [swj CHANGE]
         ypix = slice(1000 / ccdsum + 1, 3000 / ccdsum)
         d = hdu[1].data[ypix].copy()
         bpm = hdu[2].data[ypix].copy()
@@ -552,7 +553,7 @@ def rectify(ids=None, fs=None):
     for i, f in enumerate(ims):
         fname = f.split('/')[1]
         typestr = fname[:3]
-        ga, imgnum = gas[i], fname[-8:-5]
+        ga, imgnum = gas[i], fname[-9:-5]
 
         outfile = 'rec/' + typestr + '%0.2frec' % (ga) + imgnum + '.fits'
         iraf.unlearn(iraf.specrectify)
@@ -827,7 +828,7 @@ def extract(fs=None):
 def split1d(fs=None):
     iraf.cd('work')
     if fs is None:
-        fs = glob('x1d/sci*x1d???.fits')
+        fs = glob('x1d/sci*x1d????.fits')
     if len(fs) == 0:
         print "WARNING: No extracted spectra to split."
         iraf.cd('..')
@@ -1161,6 +1162,11 @@ def telluric(stdsfolder='./', fs=None):
     # Cross-correlate the standard star and the sci spectra
     # to find wavelength shift of standard star.
     p = fitxcor(waves, spec, telwave, telspec)
+    if abs(p[0] - 1.0) > 0.02 or abs(p[1]) > 10.0:
+        print "Cross-correlation scale/shift too large; won't do it:"
+        print p
+        print "   reset to [1.0, 0.0]"
+        p = [1.0, 0.0]
     # shift and stretch standard star spectrum to match science
     # spectrum.
     telcorr = interp(waves, p[0] * telwave + p[1], telspec)
