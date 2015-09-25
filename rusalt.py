@@ -151,7 +151,7 @@ def pysalt(fs=None):
     if not os.path.exists('work'):
         os.mkdir('work')
     for f in fs:
-        shutil.copy(f, 'raw/')
+        shutil.copy2(f, 'raw/')
         shutil.move(f, 'work/')
     iraf.cd('work')
 
@@ -505,7 +505,8 @@ def get_chipgaps(hdu):
         # be necessary.
         ccdsum = int(hdu[0].header['CCDSUM'].split()[1])
 
-        ypix = slice(200 / ccdsum + 1, 3800 / ccdsum)
+        #ypix = slice(200 / ccdsum + 1, 3800 / ccdsum)
+        ypix = slice(1000 / ccdsum + 1, 3000 / ccdsum)
         d = hdu[1].data[ypix].copy()
         bpm = hdu[2].data[ypix].copy()
 
@@ -513,11 +514,11 @@ def get_chipgaps(hdu):
 
         # Note we also grow the chip gap by 1 pixel on each side
         # Chip 1
-        chipgap1 = (np.min(w[w > 10]) - 1, np.max(w[w < 1500]) + 1)
+        chipgap1 = (np.min(w[w > 950]) - 1, np.max(w[w < 1100]) + 1)
         # Chip 2
-        chipgap2 = (np.min(w[w > 1500]) - 1, np.max(w[w < 2500]) + 1)
+        chipgap2 = (np.min(w[w > 2050]) - 1, np.max(w[w < 2250]) + 1)
         # edge of chip 3=
-        chipgap3 = (np.min(w[w > 2500]) - 1, hdu[2].data.shape[1] + 1)
+        chipgap3 = (np.min(w[w > 3100]) - 1, hdu[2].data.shape[1] + 1)
         return (chipgap1, chipgap2, chipgap3)
 
 
@@ -807,12 +808,19 @@ def extract(fs=None):
             scihdu.close()
             archdu.close()
             os.remove(af)
-        # Add the airmasa and exptime keywords back into the
+        # Add the airmass, exptime, and other keywords back into the
         # extracted spectrum header
-        pyfits.setval(outbase + '.fits', 'AIRMASS',
-                      value=pyfits.getval(f, r'AIRMASS'))
-        pyfits.setval(outbase + '.fits', 'EXPTIME',
-                      value=pyfits.getval(f, 'EXPTIME'))
+        kws = ['AIRMASS','EXPTIME',
+               'PROPID','PROPOSER','OBSERVER','OBSERVAT','SITELAT','SITELONG',
+               'INSTRUME','DETSWV','RA','PM-RA','DEC','PM-DEC','EQUINOX',
+               'EPOCH','DATE-OBS','TIME-OBS','UTC-OBS','TIMESYS','LST-OBS',
+               'JD','MOONANG','OBSMODE','DETMODE','SITEELEV','BLOCKID','PA',
+               'TELHA','TELRA','TELDEC','TELPA','TELAZ','TELALT','DECPANGL',
+               'TELTEM','PAYLTEM','MASKID','MASKTYP','GR-ANGLE','GRATING',
+               'FILTER'] 
+        for kw in kws:
+            pyfits.setval(outbase + '.fits', kw, value=pyfits.getval(f,kw))
+
     iraf.cd('..')
 
 
@@ -863,7 +871,7 @@ def spectoascii(fname, asciiname, ap=0):
     npix = hdu[0].data.shape[2]
     lam = w.all_pix2world(np.linspace(0, npix - 1, npix), 0, 0, 0)[0]
     spec = hdu[0].data[0, ap]
-    specerr = hdu[0].data[2, ap]
+    specerr = hdu[0].data[3, ap]
     np.savetxt(asciiname, np.array([lam, spec, specerr]).transpose())
     hdu.close()
 
@@ -1014,7 +1022,7 @@ def speccombine(fs=None):
         # interpolate linearly. This is not stricly correct but it should be
         # close. Also we don't include terms in the variance for the
         # uncertainty in the wavelength solution.
-        specerrs[i] = interp(lamgrid, lam, hdu[0].data[2][ap] ** 2.0) ** 0.5
+        specerrs[i] = interp(lamgrid, lam, hdu[0].data[3][ap] ** 2.0) ** 0.5
 
     # minimize the chi^2 given free parameters are multiplicative factors
     # We could use linear or quadratic, but for now assume constant
@@ -1037,12 +1045,18 @@ def speccombine(fs=None):
     f.writelines(lines)
     f.close()
     # run scombine after multiplying the spectra by the best fit parameters
-    if os.path.exists('out.fits'):
-        os.remove('out.fits')
-    iraf.scombine(iraf_filelist, 'sci_com.fits', scale='@flx/scales.dat',
+    combfile = 'sci_com.fits'
+    if os.path.exists(combfile):
+        os.remove(combfile)
+    iraf.scombine(iraf_filelist, combfile, scale='@flx/scales.dat',
                   reject='avsigclip', lthreshold=1e-19)
     # Remove the other apertures
     # remove the sky and arc bands from the combined spectra.
+    # remove some header keywords that don't make sense in the combined file
+    delkws = ['GRATING','GR-ANGLE','FILTER','BANDID2','BANDID3','BANDID4']
+    for kw in delkws:
+        pyfits.delval('sci_com.fits',kw)
+    # combine JD (average), AIRMASS (average), EXPTIME (sum)
     iraf.cd('..')
     return specs
 
@@ -1156,7 +1170,8 @@ def telluric(stdsfolder='./', fs=None):
     # Divide science spectrum by transformed standard star sub-spectrum
     correct_spec = spec / telcorr
     # Copy telluric-corrected data to new file.
-    tofits(outfile, correct_spec, hdr=hdr)
+    tofits(outfile, correct_spec, hdr=hdr, clobber=True)
+    print "Telluric correction applied; output is " + outfile
     iraf.cd('..')
 
 def ncor(x, y):
