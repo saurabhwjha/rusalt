@@ -1051,13 +1051,28 @@ def speccombine(fs=None):
         os.remove(combfile)
     iraf.scombine(iraf_filelist, combfile, scale='@flx/scales.dat',
                   reject='avsigclip', lthreshold=1e-19)
-    # Remove the other apertures
-    # remove the sky and arc bands from the combined spectra.
+
+    # Remove the other apertures [TBD]
+    # remove the sky and arc bands from the combined spectra. (or add back?? TBD)
+
     # remove some header keywords that don't make sense in the combined file
     delkws = ['GRATING','GR-ANGLE','FILTER','BANDID2','BANDID3','BANDID4']
     for kw in delkws:
-        pyfits.delval('sci_com.fits',kw)
+    	pyfits.delval(combfile,kw)
+
     # combine JD (average), AIRMASS (average), EXPTIME (sum)
+    #   we assume there is a c1.fits file for each image
+    c1fs = [f for f in fs if 'c1.fits' in f]
+    avgjd = np.mean([pyfits.getval(f,'JD') for f in c1fs])
+    pyfits.setval(combfile,'JD',value=avgjd)
+    print "average JD = " + str(avgjd)
+    sumet = np.sum([pyfits.getval(f,'EXPTIME') for f in c1fs])
+    pyfits.setval(combfile,'EXPTIME',value=sumet)
+    print "total EXPTIME = " + str(sumet)
+    avgam = np.mean([pyfits.getval(f,'AIRMASS') for f in c1fs])
+    pyfits.setval(combfile,'AIRMASS',value=avgam)
+    print "avg AIRMASS = " + str(avgam)
+
     iraf.cd('..')
     return specs
 
