@@ -662,6 +662,18 @@ def background(fs=None):
     iraf.cd('..')
 
 
+def isstdstar(f):
+    # get the list of standard stars
+    stdslist = glob(pysaltpath + '/data/standards/spectroscopic/*')
+    objname = pyfits.getval(f, 'OBJECT').lower().replace('-','_')
+    for std in stdslist:
+        if objname in std:
+            return True
+
+    # Otherwise not in the list so return false
+    return False
+
+
 def lax(fs=None):
     iraf.cd('work')
     if fs is None:
@@ -684,9 +696,18 @@ def lax(fs=None):
         # Set all of the pixels in the CRM mask to zero
         hdu['CRM'].data[:, :] = 0
 
+        # less aggressive lacosmic on standard star observations
+        if not isstdstar(f):
+            objl = 1.0
+            sigc = 4.0
+        else:
+            objl = 3.0
+            sigc = 10.0
+
         chipgaps = get_chipgaps(hdu)
-        chipedges = [[0, chipgaps[0][0]], [chipgaps[0][1] + 1, chipgaps[1][0]],
-                     [chipgaps[1][1] + 1, chipgaps[2][0]]]
+
+        chipedges = [[0, chipgaps[0][0]], [chipgaps[0][1] + 1, 
+                             chipgaps[1][0]], [chipgaps[1][1] + 1, chipgaps[2][0]]]
 
         # Run each chip separately
         for chip in range(3):
@@ -696,8 +717,8 @@ def lax(fs=None):
             # Default value seems to work.
             chipinds = slice(chipedges[chip][0], chipedges[chip][1])
             crmask, _cleanarr = lacosmicx.lacosmicx(hdu[1].data[:, chipinds].copy(),
-                          inmask=np.asarray(hdu[2].data[:, chipinds].copy(), dtype = np.uint8), sigclip=4.0,
-                          objlim=1.0, sigfrac=0.1, gain=1.0, pssl=0.0)
+                                  inmask=np.asarray(hdu[2].data[:, chipinds].copy(), dtype = np.uint8), sigclip=sigc,
+                                 objlim=objl, sigfrac=0.1, gain=1.0, pssl=0.0)
 
 
             # Update the image
@@ -853,18 +874,6 @@ def split1d(fs=None):
     iraf.cd('..')
 
 
-def isstdstar(f):
-    # get the list of standard stars
-    stdslist = glob(pysaltpath + '/data/standards/spectroscopic/*')
-    objname = pyfits.getval(f, 'OBJECT').lower()
-    for std in stdslist:
-        if objname in std:
-            return True
-
-    # Otherwise not in the list so return false
-    return False
-
-
 def spectoascii(fname, asciiname, ap=0):
     hdu = pyfits.open(fname)
     w = WCS(fname)
@@ -901,7 +910,7 @@ def stdsensfunc(fs=None):
             asciispec = 'std/std.ascii.dat'
             spectoascii(f, asciispec)
             # run specsens
-            stdfile = pysaltpath + '/data/standards/spectroscopic/m%s.dat' % pyfits.getval(f, 'OBJECT').lower()
+            stdfile = pysaltpath + '/data/standards/spectroscopic/m%s.dat' % pyfits.getval(f, 'OBJECT').lower().replace('-','_')
             extfile = pysaltpath + '/data/site/suth_extinct.dat'
             iraf.unlearn(iraf.specsens)
             iraf.specsens(asciispec, outfile, stdfile, extfile,
@@ -1058,7 +1067,7 @@ def speccombine(fs=None):
     # remove some header keywords that don't make sense in the combined file
     delkws = ['GRATING','GR-ANGLE','FILTER','BANDID2','BANDID3','BANDID4']
     for kw in delkws:
-    	pyfits.delval(combfile,kw)
+        pyfits.delval(combfile,kw)
 
     # combine JD (average), AIRMASS (average), EXPTIME (sum)
     #   we assume there is a c1.fits file for each image
