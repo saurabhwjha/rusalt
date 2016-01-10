@@ -259,7 +259,7 @@ def makeflats(fs=None):
                               value=pyfits.getval(f, 'EXPTIME'))
 
             # set the output combined file name
-            combineoutname = 'flats/flt%0.2fcomc%i.fits' % (ga, c)
+            combineoutname = 'flats/flt%05.2fcomc%i.fits' % (ga, c)
             if os.path.exists(combineoutname):
                 os.remove(combineoutname)
             # initialize the iraf command
@@ -273,7 +273,7 @@ def makeflats(fs=None):
             pyfits.setval(combineoutname, 'DISPAXIS', value=1)
             # We want to make an illumination correction file
             # before running response:
-            illumoutname = 'flats/flt%0.2fillc%i.fits' % (ga, c)
+            illumoutname = 'flats/flt%05.2fillc%i.fits' % (ga, c)
             iraf.unlearn(iraf.illumination)
             iraf.illumination(images=combineoutname,
                               illuminations=illumoutname, interactive=False,
@@ -297,12 +297,12 @@ def makeflats(fs=None):
             illumhdu.close()
 
             # File stage m1d for median 1-D
-            flat1dfname = 'flats/flt%0.2fm1dc%i.fits' % (ga, c)
+            flat1dfname = 'flats/flt%05.2fm1dc%i.fits' % (ga, c)
             tofits(flat1dfname, flat1d, hdr=combinehdu[0].header.copy())
 
             # run response
             # r1d = response1d
-            resp1dfname = 'flats/flt%0.2fr1dc%i.fits' % (ga, c)
+            resp1dfname = 'flats/flt%05.2fr1dc%i.fits' % (ga, c)
             iraf.response(flat1dfname, flat1dfname, resp1dfname, order=31,
                           interactive=False, naverage=-5, low_reject=3.0,
                           high_reject=3.0, niterate=5, mode='hl')
@@ -320,7 +320,7 @@ def makeflats(fs=None):
             resp1d[abs(resp1d - 1.0) > 5.0 * flatsig] = 1.0
             resp = flat1d / resp1d
 
-            resp2dfname = 'flats/flt%0.2fresc%i.fits' % (ga, c)
+            resp2dfname = 'flats/flt%05.2fresc%i.fits' % (ga, c)
             resp2d = combinehdu[0].data.copy() / resp
             tofits(resp2dfname, resp2d, hdr=combinehdu[0].header.copy())
             combinehdu.close()
@@ -364,13 +364,13 @@ def flatten(fs=None, masterflatdir=None):
         ga = gas[i]
         # For each chip
         for c in range(1, 7):
-            flatfile = 'flats/flt%0.2fresc%i.fits' % (ga, c)
+            flatfile = 'flats/flt%05.2fresc%i.fits' % (ga, c)
             if len(glob(flatfile)) == 0:
                    if masterflatdir is None:
                        print("No flat field image found for %s"% f)
                        continue
                    # Check for the master flat directory
-                   flatfile = masterflatdir+'/flt%0.2fresc%i.fits' % (ga, c)
+                   flatfile = masterflatdir+'/flt%05.2fresc%i.fits' % (ga, c)
                    if len(glob(flatfile)) == 0:
                        # Still can't find one? Abort!!
                        print("No flat field image found for %s"% f)
@@ -394,7 +394,7 @@ def flatten(fs=None, masterflatdir=None):
         # by salt naming convention, these should be the last 4 characters
         # before the '.fits'
         imnum = f[-9:-5]
-        outname = 'flts/' + typestr + '%0.2fflt%04i.fits' % (float(ga),
+        outname = 'flts/' + typestr + '%05.2fflt%04i.fits' % (float(ga),
                                                              int(imnum))
         thishdu.writeto(outname)
         thishdu.close()
@@ -428,7 +428,7 @@ def mosaic(fs=None):
         # before the '.fits'
         imnum = fname[-9:-5]
         outname = 'mos/' + typestr
-        outname += '%0.2fmos%04i.fits' % (float(ga), int(imnum))
+        outname += '%05.2fmos%04i.fits' % (float(ga), int(imnum))
         # prepare to run saltmosaic
         iraf.unlearn(iraf.saltmosaic)
         iraf.flpr()
@@ -471,18 +471,24 @@ def identify2d(fs=None):
                  'Hg Ar': 'HgAr.salt'}
     for i, f in enumerate(arcfs):
         ga = arcgas[i]
+
         # find lamp and corresponding linelist
         lamp = pyfits.getval(f, 'LAMPID')
+        lampfn = lampfiles[lamp]
+        if pyfits.getval(f,'GRATING') == 'PG0300' and lamp == 'Ar':
+            lampfn = 'Argon_lores.swj'
+
         ccdsum = int(pyfits.getval(f, 'CCDSUM').split()[1])
 
         # linelistpath is a global variable defined in beginning, path to
         # where the line lists are.
-        lamplines = pysaltpath + '/data/linelists/' + lampfiles[lamp]
+        lamplines = pysaltpath + '/data/linelists/' + lampfn
+        print(lamplines)
 
         # img num should be right before the .fits
         imgnum = f[-9:-5]
         # run pysalt specidentify
-        idfile = 'id2/arc%0.2fid2%04i' % (float(ga), int(imgnum)) + '.db'
+        idfile = 'id2/arc%05.2fid2%04i' % (float(ga), int(imgnum)) + '.db'
         iraf.unlearn(iraf.specidentify)
         iraf.flpr()
         iraf.specidentify(images=f, linelist=lamplines, outfile=idfile,
@@ -555,7 +561,7 @@ def rectify(ids=None, fs=None):
         typestr = fname[:3]
         ga, imgnum = gas[i], fname[-9:-5]
 
-        outfile = 'rec/' + typestr + '%0.2frec' % (ga) + imgnum + '.fits'
+        outfile = 'rec/' + typestr + '%05.2frec' % (ga) + imgnum + '.fits'
         iraf.unlearn(iraf.specrectify)
         iraf.flpr()
         idfile = ids[np.array(idgas) == ga][0]
@@ -629,7 +635,7 @@ def background(fs=None):
 
         # the outfile name is very similar, just change folder prefix and
         # 3-char stage substring
-        outfile = 'bkg/' + f[4:12] + 'bkg' + f[15:]
+        outfile = f.replace('nrm','bkg')
         # We are going to use fit1d instead of the background task
         # Go look at the code for the background task: it is literally a wrapper for 1D
         # but it removes the BPM option. Annoying.
@@ -686,7 +692,7 @@ def lax(fs=None):
     if not os.path.exists('lax'):
         os.mkdir('lax')
     for f in fs:
-        outname = 'lax/' + f[4:12] + 'lax' + f[15:]
+        outname = f.replace('bkg','lax')
         hdu = pyfits.open(f)
 
         # Add a CRM extension
