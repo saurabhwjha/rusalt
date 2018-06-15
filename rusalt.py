@@ -801,9 +801,9 @@ def extract(fs=None):
         iraf.apall(input=f + '[SCI]', output=outbase, interactive='yes',
                    review='no', line='INDEF', nsum=-1000, lower=-5, upper=5,
                    b_function='legendre', b_order=5,
-                   b_sample='-400:-200,200:400', b_naverage=-10, b_niterate=5,
+                   b_sample='-200:-100,100:200', b_naverage=-10, b_niterate=5,
                    b_low_reject=3.0, b_high_reject=3.0, nfind=1, t_nsum=15,
-                   t_step=15, t_nlost=100, t_function='legendre', t_order=5,
+                   t_step=15, t_nlost=200, t_function='legendre', t_order=5,
                    t_niterate=5, t_low_reject=3.0, t_high_reject=3.0,
                    background='fit', weights='variance', pfit='fit1d',
                    clean='no', readnoise=readnoise, gain=1.0, lsigma=4.0,
@@ -1065,13 +1065,13 @@ def speccombine(fs=None):
     if os.path.exists(combfile):
         os.remove(combfile)
     iraf.scombine(iraf_filelist, combfile, scale='@flx/scales.dat',
-                  reject='avsigclip', lthreshold=1e-19)
+                  reject='avsigclip', lthreshold=-1e-17)
 
     # Remove the other apertures [TBD]
     # remove the sky and arc bands from the combined spectra. (or add back?? TBD)
 
     # remove some header keywords that don't make sense in the combined file
-    delkws = ['GRATING','GR-ANGLE','FILTER','BANDID2','BANDID3','BANDID4']
+    delkws = ['GR-ANGLE','FILTER','BANDID2','BANDID3','BANDID4']
     for kw in delkws:
         pyfits.delval(combfile,kw)
 
