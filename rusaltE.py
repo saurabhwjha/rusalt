@@ -51,6 +51,7 @@ def load_modules():
     from scipy import optimize
     
     global ds9
+#    import pyds9 as ds9
     import ds9
     
     global GaussianProcess
@@ -64,14 +65,16 @@ def load_modules():
     iraf.longslit()
     iraf.apextract()
     iraf.imutil()
+    iraf.rvsao(motd='no')
 
 # System specific path to pysalt
+# pysaltpath = '/iraf/extern/pysalt'
 pysaltpath = '/usr/local/astro64/iraf/extern/pysalt'
 
 # Define the stages
-allstages = ['pysalt', 'makeflats', 'flatten', 'mosaic',
+allstages = ['sorting',
              'identify2d', 'rectify', 'slitnormalize', 'background', 'lax', 'fixpix',
-             'extract', 'split1d','stdsensfunc', 'fluxcal', 'speccombine',
+             'extract', 'split1d','stdsensfunc', 'fluxcal','trim', 'speccombine',
              'mktelluric', 'telluric']
 
 
@@ -98,12 +101,13 @@ def ds9display(filename):
     d.set('zscale')
     d.set("zscale contrast 0.1")
 
-def run(files=None, dostages='all', stdsfolder='./', flatfolder=None):
+def run(files=None, dostages='all', stdsfolder='./', flatfolder=None, brightstar=False, fastred=False):
     # Load the modules if they aren't already.
     if not 'iraf' in sys.modules:
         load_modules()
     # Make sure the stages parameters makes sense
     try:
+        print(dostages)
         if dostages == 'all':
             n0 = 0
             n = len(allstages)
@@ -129,80 +133,143 @@ def run(files=None, dostages='all', stdsfolder='./', flatfolder=None):
     print(stages)
 
     for stage in stages:
-        if stage =='flatten':
+        if stage == 'flatten':
             flatten(fs=files, masterflatdir=flatfolder)
+        elif stage == 'sorting':
+            sorting(fs=files,fastred=fastred)
+        elif stage == 'lax':
+            lax(fs=files,bright=brightstar)
         elif stage == 'fluxcal' or stage == 'telluric':
             globals()[stage](fs=files,stdsfolder=stdsfolder)
         else:
             globals()[stage](fs=files)
 
 
-def pysalt(fs=None):
-    # Run the pysalt pipeline on the raw data.
+def get_chipgaps(hdu, deriv2=False):
+        # Get the x coordinages of all of the chip gap pixels
+        # recall that pyfits opens images with coordinates y, x
+        # get the BPM from 51-950 which are the nominally good pixels
+        # (for binning = 4 in the y direction)
+        # (the default wavelength solutions are from 50.5 - 950.5)
+        # [swj CHANGED this to use rows 250-750 to avoid potential bad rows]
+        # Note this throws away one extra pixel on either side but it seems to
+        # be necessary.
+
+        # check binning in y and x directions
+        ccdsum = int(hdu[0].header['CCDSUM'].split()[1])
+        ccdxsum = int(hdu[0].header['CCDSUM'].split()[0])
+
+        if ccdxsum != 2:
+            sys.exit("Abort! Only bin by 2 in wavelength direction is supported. Data are bin by " + str(ccdxsum))
+        
+        if not deriv2:
+            #ypix = slice(200 / ccdsum + 1, 3800 / ccdsum)  [swj CHANGE]
+            ypix = slice(1000 / ccdsum + 1, 3000 / ccdsum)
+            d = hdu[1].data[ypix].copy()
+            bpm = hdu[2].data[ypix].copy()
+            w = np.where(np.logical_or(bpm > 0, d == 0))[1]
+            # Note we also grow the chip gap by 1 pixel on each side
+            # Chip 1
+            chipgap1 = (np.min(w[w > 700]) - 1, np.max(w[w < 1300]) + 1)
+            # Chip 2
+            chipgap2 = (np.min(w[w > 1750]) - 1, np.max(w[w < 2350]) + 1)
+            # edge of chip 3
+            chipgap3 = (np.min(w[w > 2900]) - 1, hdu[2].data.shape[1] + 1)
+        else:
+            # in the quicklook (nighttime or "fast") reductions the chipgaps are not set to zero
+            # rather, they are linearly interpolated over. we can find them as the 2nd derivative == 0
+            print("chipgaps: trying 2nd derivative method to find them, fast reduction data")
+            ypix = slice(1980 / ccdsum + 1, 2020 / ccdsum)
+            d = hdu[1].data[ypix].copy()
+            bpm = hdu[2].data[ypix].copy()
+            w = np.where(np.logical_or(bpm[:,1:-1] > 0, np.diff(d,n=2,axis=1) == 0.0))[1]
+            chipgap1 = (np.min(w[w > 1003]) - 3, np.max(w[w < 1117]) + 3)
+            chipgap2 = (np.min(w[w > 2083]) - 3, np.max(w[w < 2197]) + 3)
+            chipgap3 = (np.min(w[w > 3133]) - 3, hdu[2].data.shape[1] + 1)
+        
+        # test if chipgaps look okay, if not, set them manually 
+        if (chipgap1[0] >= chipgap1[1]) or (chipgap2[0] >= chipgap2[1]) or (chipgap3[0] >= chipgap3[1]):
+            print("chipgaps: didn't work... try --fastred option? manually setting chipgaps")
+            print("chipgaps: this should be conservative for PG0300 or PG0900 data")
+            print("chipgaps: but watch out if you are using PG1800, PG2300, or PG3000")
+            chipgap1 = (1000, 1120)
+            chipgap2 = (2080, 2200)
+            chipgap3 = (3130, hdu[2].data.shape[1] + 1)
+
+        return (chipgap1, chipgap2, chipgap3)
+
+
+def sorting(fs=None,fastred=False):
+    # Run the pysalt pipeline on the reduced data.
     if fs is None:
-        fs = glob('P*.fits')
+        fs = sorted(glob('mbxgpP*.fits'))
     if len(fs) == 0:
-        print "WARNING: No raw files to run PySALT pre-processing."
+        fs = sorted(glob('mbxpP*.fits'))
+    if len(fs) == 0:
+        print "WARNING: No product files to run PySALT pre-processing."
         return
 
     # Copy the raw files into a raw directory
-    if not os.path.exists('raw'):
-        os.mkdir('raw')
+    if not os.path.exists('product'):
+        os.mkdir('product')
     if not os.path.exists('work'):
         os.mkdir('work')
+    if not os.path.exists('work/srt'):
+        os.mkdir('work/srt')
     for f in fs:
-        shutil.copy2(f, 'raw/')
-        shutil.move(f, 'work/')
-    iraf.cd('work')
+        shutil.copy2(f, 'product/')
+    scifs, scigas = get_ims(fs, 'sci')
+    arcfs, arcgas = get_ims(fs, 'arc')
 
-    # Run each of the pysalt pipeline steps deleting temporary files as we go
-    # saltprepare
-    iraf.unlearn(iraf.saltprepare)
-    # Currently, there is not a bad pixel mask provided by SALT
-    # so we don't create one here.
-    iraf.saltprepare(images='P*.fits', clobber=True, mode='h')
+    ims = np.append(scifs, arcfs)
+    gas = np.append(scigas, arcgas)
 
-    for f in glob('P*.fits'):
-        os.remove(f)
-    # saltgain
-    iraf.unlearn(iraf.saltgain)
-    # Multiply by the gain so that everything is in electrons.
-    iraf.saltgain(images='pP*.fits',
-                  gaindb=pysaltpath + '/data/rss/RSSamps.dat',
-                  mult=True, usedb=True, mode='h')
+    for i, f in enumerate(ims):
+        ga = gas[i]
+        if f in scifs:
+            typestr = 'sci'
+        else:
+            typestr = 'arc'
+        # by our naming convention, imnum should be the last 4 characters
+        # before the '.fits'
+        imnum = f[-9:-5]
+        outname = 'srt/' + typestr
+        outname += '%05.2fmos%04i.fits' % (float(ga), int(imnum))
+        shutil.move(f, 'work/'+outname)
+        iraf.cd('work') 
+        h = pyfits.open(outname, 'update')
+        maskim = h[1].data.copy()
+        maskim[:, :] = 0.0
+        maskim[abs(h[1].data) < 1e-5] = 1
+        imhdu = pyfits.ImageHDU(maskim)
 
-    for f in glob('pP*.fits'):
-        os.remove(f)
+        h.append(imhdu)
+        h[1].header['BPMEXT'] = 2
+        h[2].header['EXTNAME'] = 'BPM'
+        h[2].header['CD2_2'] = 1
+        h.flush()
 
-    # write a keyword in the header keyword gain = 1 in each amplifier
-    fs = glob('gpP*.fits')
-    for f in fs:
-        for i in range(1, 7):
-            pyfits.setval(f, 'GAIN', ext=i, value=1.0)
+        if fastred:
+            # the quicklook pipeline interpolates over the chip gaps
+            # here we try to set the chip gaps to zero instead
+            print(outname)
+            chipgaps = get_chipgaps(h, deriv2=True)
+            print (" -- srt chipgaps --")
+            print (chipgaps)
+            # Chip 1
+            h[2].data[:, chipgaps[0][0]:chipgaps[0][1]] = 1
+            # Chip 2
+            h[2].data[:, chipgaps[1][0]:chipgaps[1][1]] = 1
+            # edge of chip 3
+            h[2].data[:, chipgaps[2][0]:chipgaps[2][1]] = 1
+            # Cover the other blank regions
+            h[2].data[[h[1].data == 0]] = 1
+            # Set all of the data to zero in the BPM
+            h[1].data[h[2].data == 1] = 0.0
+            h.flush()
 
-    # saltxtalk
-    iraf.unlearn(iraf.saltxtalk)
-    iraf.saltxtalk(images='gpP*.fits', clobber=True, usedb=True,
-                   xtalkfile=pysaltpath + '/data/rss/RSSxtalk.dat', mode='h')
-    for f in glob('gpP*.fits'):
-        os.remove(f)
-
-    # saltbias
-    iraf.unlearn(iraf.saltbias)
-    iraf.saltbias(images='xgpP*.fits', clobber=True, mode='h')
-    for f in glob('xgpP*.fits'):
-        os.remove(f)
-
-    # Put all of the newly created files into the pysalt directory
-    if not os.path.exists('pysalt'):
-        os.mkdir('pysalt')
-    for f in glob('bxgpP*.fits'):
-        shutil.move(f, 'pysalt')
-    iraf.cd('..')
-
-    # Hold off on the the mosaic step for now. We want to do some processing on
-    # the individual chips
-
+        h.close()
+        iraf.cd('..')
 
 def get_ims(fs, imtype):
     imtypekeys = {'sci': 'OBJECT', 'arc': 'ARC', 'flat': 'FLAT'}
@@ -224,239 +291,10 @@ def get_scis_and_arcs(fs):
     return ims, gas
 
 
-def makeflats(fs=None):
-    # Note the list of files need to not include any paths relative to
-    # the work directory.
-    # Maybe not the greatest convention, but we can update this later
-    iraf.cd('work')
-    if fs is None:
-        fs = glob('pysalt/bxgp*.fits')
-    if len(fs) == 0:
-        print "WARNING: No flat-fields to combine and normalize."
-        # Fail gracefully by going up a directory
-        iraf.cd('..')
-        return
-    # make a flats directory
-    if not os.path.exists('flats'):
-        os.mkdir('flats')
-
-    # Figure out which images are flats and which grating angles were used
-    allflats, grangles = get_ims(fs, 'flat')
-
-    # For each grating angle
-    for ga in np.unique(grangles):
-        # grab the flats for this gr angle
-        flats = allflats[grangles == ga]
-
-        # For each chip
-        for c in range(1, 7):
-            # run imcombine with average and sigclip, weighted by exposure time
-            flatlist = ''
-            for f in flats:
-                flatlist += '%s[%i],' % (f, c)
-                # Add the exptime keyword to each extension
-                pyfits.setval(f, 'EXPTIME', ext=c,
-                              value=pyfits.getval(f, 'EXPTIME'))
-
-            # set the output combined file name
-            combineoutname = 'flats/flt%05.2fcomc%i.fits' % (ga, c)
-            if os.path.exists(combineoutname):
-                os.remove(combineoutname)
-            # initialize the iraf command
-            iraf.unlearn(iraf.imcombine)
-            print(flatlist)
-            # don't forget to remove the last comma in the filelist
-            iraf.imcombine(input=flatlist[:-1], output=combineoutname,
-                           combine='average', reject='sigclip', lsigma=3.0,
-                           hsigma=3.0, weight='exposure', expname='EXPTIME')
-
-            pyfits.setval(combineoutname, 'DISPAXIS', value=1)
-            # We want to make an illumination correction file
-            # before running response:
-            illumoutname = 'flats/flt%05.2fillc%i.fits' % (ga, c)
-            iraf.unlearn(iraf.illumination)
-            iraf.illumination(images=combineoutname,
-                              illuminations=illumoutname, interactive=False,
-                              naverage=-40, order=11, low_reject=3.0,
-                              high_reject=3.0, niterate=5, mode='hl')
-
-            # Flag any pixels in the illumination correction< 0.1
-            illumhdu = pyfits.open(illumoutname, mode='update')
-            illumhdu[0].data[illumhdu[0].data <= 0.1] = 0.0
-            illumhdu.flush()
-
-            # Get 40 pixels out of the middle of the image and
-            # median them to run response
-            combinehdu = pyfits.open(combineoutname)
-            ny = combinehdu[0].data.shape[0]
-            # divide out the illumination correction before running response
-            flat1d = np.median(combinehdu[0].data[ny / 2 - 21: ny / 2 + 20, :]
-                               / illumhdu[0].data[ny / 2 - 21: ny / 2 + 20, :],
-                               axis=0)
-            # close the illumination file because we don't need it anymore
-            illumhdu.close()
-
-            # File stage m1d for median 1-D
-            flat1dfname = 'flats/flt%05.2fm1dc%i.fits' % (ga, c)
-            tofits(flat1dfname, flat1d, hdr=combinehdu[0].header.copy())
-
-            # run response
-            # r1d = response1d
-            resp1dfname = 'flats/flt%05.2fr1dc%i.fits' % (ga, c)
-            iraf.response(flat1dfname, flat1dfname, resp1dfname, order=31,
-                          interactive=False, naverage=-5, low_reject=3.0,
-                          high_reject=3.0, niterate=5, mode='hl')
-
-            resp1dhdu = pyfits.open(resp1dfname)
-            resp1d = resp1dhdu[0].data.copy()
-            resp1dhdu.close()
-
-            # After response divide out the response function
-            # normalize the 1d resp to its median
-            resp1d /= np.median(resp1d)
-
-            # Chuck any outliers
-            flatsig = np.std(resp1d - 1.0)
-            resp1d[abs(resp1d - 1.0) > 5.0 * flatsig] = 1.0
-            resp = flat1d / resp1d
-
-            resp2dfname = 'flats/flt%05.2fresc%i.fits' % (ga, c)
-            resp2d = combinehdu[0].data.copy() / resp
-            tofits(resp2dfname, resp2d, hdr=combinehdu[0].header.copy())
-            combinehdu.close()
-
-            # close the combined flat because we don't need it anymore
-            combinehdu.close()
-
-            pyfits.setval(resp2dfname, 'DISPAXIS', value=1)
-
-            # Reset any pixels in the flat field correction< 0.1
-            # We could flag bad pixels here if we want, but not right now
-            flathdu = pyfits.open(resp2dfname, mode='update')
-            flathdu[0].data[flathdu[0].data <= 0.1] = 0.0
-            flathdu.flush()
-            flathdu.close()
-    # Step back up to the top directory
-    iraf.cd('..')
-
-
-def flatten(fs=None, masterflatdir=None):
-    iraf.cd('work')
-    if fs is None:
-        fs = glob('pysalt/bxgpP*.fits')
-    if len(fs) == 0:
-        print "WARNING: No images to flat-field."
-        # Change directories to fail more gracefully
-        iraf.cd('..')
-        return
-    if not os.path.exists('flts'):
-        os.mkdir('flts')
-    # Make sure there are science images or arcs and what grating angles were
-    # used
-    scifs, scigas = get_ims(fs, 'sci')
-    arcfs, arcgas = get_ims(fs, 'arc')
-
-    ims = np.append(scifs, arcfs)
-    gas = np.append(scigas, arcgas)
-    # For each science and arc image
-    for i, f in enumerate(ims):
-        thishdu = pyfits.open(f)
-        ga = gas[i]
-        # For each chip
-        for c in range(1, 7):
-            flatfile = 'flats/flt%05.2fresc%i.fits' % (ga, c)
-            if len(glob(flatfile)) == 0:
-                   if masterflatdir is None:
-                       print("No flat field image found for %s"% f)
-                       continue
-                   # Check for the master flat directory
-                   flatfile = masterflatdir+'/flt%05.2fresc%i.fits' % (ga, c)
-                   if len(glob(flatfile)) == 0:
-                       # Still can't find one? Abort!!
-                       print("No flat field image found for %s"% f)
-                       continue
-
-            # open the corresponding response file
-            resphdu = pyfits.open(flatfile)
-            # divide out the illumination correction and the flatfield
-            # make sure divzero = 0.0
-            thishdu[c].data /= resphdu[0].data.copy()
-            # replace the infinities with 0.0
-            thishdu[c].data[np.isinf(thishdu[c].data)] = 0.0
-            resphdu.close()
-
-        # save the updated file
-        if f in scifs:
-            typestr = 'sci'
-        else:
-            typestr = 'arc'
-        # get the image number
-        # by salt naming convention, these should be the last 4 characters
-        # before the '.fits'
-        imnum = f[-9:-5]
-        outname = 'flts/' + typestr + '%05.2fflt%04i.fits' % (float(ga),
-                                                             int(imnum))
-        thishdu.writeto(outname)
-        thishdu.close()
-
-    iraf.cd('..')
-
-
-def mosaic(fs=None):
-
-    iraf.cd('work')
-    # If the file list is not given, grab the default files
-    if fs is None:
-        fs = glob('flts/*.fits')
-    # Abort if there are no files
-    if len(fs) == 0:
-        print "WARNING: No flat-fielded images to mosaic."
-        iraf.cd('..')
-        return
-
-    if not os.path.exists('mos'):
-        os.mkdir('mos')
-
-    # Get the images to work with
-    ims, gas = get_scis_and_arcs(fs)
-
-    for i, f in enumerate(ims):
-        ga = gas[i]
-        fname = f.split('/')[1]
-        typestr = fname[:3]
-        # by our naming convention, imnum should be the last 4 characters
-        # before the '.fits'
-        imnum = fname[-9:-5]
-        outname = 'mos/' + typestr
-        outname += '%05.2fmos%04i.fits' % (float(ga), int(imnum))
-        # prepare to run saltmosaic
-        iraf.unlearn(iraf.saltmosaic)
-        iraf.flpr()
-        iraf.saltmosaic(images=f, outimages=outname, outpref='',
-                        geomfile=pysaltpath + '/data/rss/RSSgeom.dat',
-                        clobber=True, mode='h')
-
-        # Make a bad pixel mask marking where there is no data.
-        h = pyfits.open(outname, 'update')
-        maskim = h[1].data.copy()
-        maskim[:, :] = 0.0
-        maskim[abs(h[1].data) < 1e-5] = 1
-        imhdu = pyfits.ImageHDU(maskim)
-
-        h.append(imhdu)
-        h[1].header['BPMEXT'] = 2
-        h[2].header['EXTNAME'] = 'BPM'
-        h[2].header['CD2_2'] = 1
-        h.flush()
-        h.close()
-
-    iraf.cd('..')
-
-
 def identify2d(fs=None):
     iraf.cd('work')
     if fs is None:
-        fs = glob('mos/arc*mos*.fits')
+        fs = sorted(glob('srt/arc*mos*.fits'))
     if len(fs) == 0:
         print "WARNING: No mosaiced (2D) specidentify."
         # Change directories to fail gracefully
@@ -501,40 +339,12 @@ def identify2d(fs=None):
     iraf.cd('..')
 
 
-def get_chipgaps(hdu):
-        # Get the x coordinages of all of the chip gap pixels
-        # recall that pyfits opens images with coordinates y, x
-        # get the BPM from 51-950 which are the nominally good pixels
-        # (for binning = 4 in the y direction)
-        # (the default wavelength solutions are from 50.5 - 950.5)
-        # [swj CHANGED this to use rows 250-750 to avoid potential bad rows]
-        # Note this throws away one extra pixel on either side but it seems to
-        # be necessary.
-        ccdsum = int(hdu[0].header['CCDSUM'].split()[1])
-
-        #ypix = slice(200 / ccdsum + 1, 3800 / ccdsum)  [swj CHANGE]
-        ypix = slice(1000 / ccdsum + 1, 3000 / ccdsum)
-        d = hdu[1].data[ypix].copy()
-        bpm = hdu[2].data[ypix].copy()
-
-        w = np.where(np.logical_or(bpm > 0, d == 0))[1]
-
-        # Note we also grow the chip gap by 1 pixel on each side
-        # Chip 1
-        chipgap1 = (np.min(w[w > 950]) - 1, np.max(w[w < 1100]) + 1)
-        # Chip 2
-        chipgap2 = (np.min(w[w > 2050]) - 1, np.max(w[w < 2250]) + 1)
-        # edge of chip 3=
-        chipgap3 = (np.min(w[w > 3100]) - 1, hdu[2].data.shape[1] + 1)
-        return (chipgap1, chipgap2, chipgap3)
-
-
 def rectify(ids=None, fs=None):
     iraf.cd('work')
     if ids is None:
-        ids = np.array(glob('id2/arc*id2*.db'))
+        ids = np.array(sorted(glob('id2/arc*id2*.db')))
     if fs is None:
-        fs = glob('mos/*mos*.fits')
+        fs = sorted(glob('srt/*mos*.fits'))
     if len(ids) == 0:
         print "WARNING: No wavelength solutions for rectification."
         iraf.cd('..')
@@ -554,6 +364,12 @@ def rectify(ids=None, fs=None):
         idgas.append(float(idgaline.split('=')[1]))
 
     ims, gas = get_scis_and_arcs(fs)
+    print('_____idgas_____')
+    print (np.array(idgas))
+    print('_____ga_____')
+    print (gas)
+
+
     if not os.path.exists('rec'):
         os.mkdir('rec')
     for i, f in enumerate(ims):
@@ -564,11 +380,23 @@ def rectify(ids=None, fs=None):
         outfile = 'rec/' + typestr + '%05.2frec' % (ga) + imgnum + '.fits'
         iraf.unlearn(iraf.specrectify)
         iraf.flpr()
-        idfile = ids[np.array(idgas) == ga][0]
+        # idfiles = ids[np.array(idgas) == ga]
+        # if len(idfiles)==0:
+        #     print "WARNING: No wavelength solution for GR-ANGLE=" + "%f" % (ga)
+        #     break
+        # idfile = idfiles[0]
+        # print(fname,idfile)
+        idfiles = ids[np.abs(np.array(idgas) - ga) < 0.019]
+        if len(idfiles)==0:
+            print "WARNING: No wavelength solution for GR-ANGLE=" + "%f" % (ga)
+            break
+        idfile = idfiles[0]
         iraf.specrectify(images=f, outimages=outfile, solfile=idfile,
                          outpref='', function='legendre', order=3,
                          inttype='interp', conserve='yes', clobber='yes',
                          verbose='yes')
+
+        pyfits.setval(outfile, 'WAVESOLN', extname='SCI', value=idfile, comment='RUSALT pipeline identify2d')
 
         # Update the BPM to mask any blank regions
         h = pyfits.open(outfile, 'update')
@@ -577,6 +405,8 @@ def rectify(ids=None, fs=None):
         # To deal with this we just throw away the min and max of each side of
         # the curved chip gap
         chipgaps = get_chipgaps(h)
+        print (" -- chipgaps --")
+        print (chipgaps)
 
         # Chip 1
         h[2].data[:, chipgaps[0][0]:chipgaps[0][1]] = 1
@@ -597,7 +427,7 @@ def rectify(ids=None, fs=None):
 def slitnormalize(fs=None):
     iraf.cd('work')
     if fs is None:
-        fs = glob('rec/*rec*.fits')
+        fs = sorted(glob('rec/*rec*.fits'))
     if len(fs) == 0:
         print "WARNING: No rectified files for slitnormalize."
         # Change directories to fail gracefully
@@ -619,7 +449,7 @@ def background(fs=None):
     iraf.cd('work')
     # Get rectified science images
     if fs is None:
-        fs = glob('nrm/sci*nrm*.fits')
+        fs = sorted(glob('nrm/sci*nrm*.fits'))
     if len(fs) == 0:
         print "WARNING: No rectified images for background-subtraction."
         iraf.cd('..')
@@ -670,7 +500,7 @@ def background(fs=None):
 
 def isstdstar(f):
     # get the list of standard stars
-    stdslist = glob(pysaltpath + '/data/standards/spectroscopic/*')
+    stdslist = sorted(glob(pysaltpath + '/data/standards/spectroscopic/*'))
     objname = pyfits.getval(f, 'OBJECT').lower().replace('-','_')
     for std in stdslist:
         if objname in std:
@@ -680,10 +510,10 @@ def isstdstar(f):
     return False
 
 
-def lax(fs=None):
+def lax(fs=None,bright=False):
     iraf.cd('work')
     if fs is None:
-        fs = glob('bkg/*bkg*.fits')
+        fs = sorted(glob('bkg/*bkg*.fits'))
     if len(fs) == 0:
         print "WARNING: No background-subtracted files for Lacosmicx."
         iraf.cd('..')
@@ -702,13 +532,14 @@ def lax(fs=None):
         # Set all of the pixels in the CRM mask to zero
         hdu['CRM'].data[:, :] = 0
 
-        # less aggressive lacosmic on standard star observations
-        if not isstdstar(f):
+        # less aggressive lacosmic on bright objects or standard star observations
+        if bright or isstdstar(f):
+            print("bright star: less aggressive lacosmicx parameters used")
+            objl = 3.0 
+            sigc = 10.0
+        else:
             objl = 1.0
             sigc = 4.0
-        else:
-            objl = 3.0
-            sigc = 10.0
 
         chipgaps = get_chipgaps(hdu)
 
@@ -742,7 +573,7 @@ def lax(fs=None):
 def fixpix(fs=None):
     iraf.cd('work')
     if fs is None:
-        fs = glob('nrm/sci*nrm*.fits')
+        fs = sorted(glob('nrm/sci*nrm*.fits'))
     if len(fs) == 0:
         print "WARNING: No rectified images to fix."
         iraf.cd('..')
@@ -776,7 +607,7 @@ def fixpix(fs=None):
 def extract(fs=None):
     iraf.cd('work')
     if fs is None:
-        fs = glob('fix/*fix*.fits')
+        fs = sorted(glob('fix/*fix*.fits'))
     if len(fs) == 0:
         print "WARNING: No fixpixed images available for extraction."
         iraf.cd('..')
@@ -801,7 +632,7 @@ def extract(fs=None):
         iraf.apall(input=f + '[SCI]', output=outbase, interactive='yes',
                    review='no', line='INDEF', nsum=-1000, lower=-5, upper=5,
                    b_function='legendre', b_order=5,
-                   b_sample='-200:-100,100:200', b_naverage=-10, b_niterate=5,
+                   b_sample='-200:-50,50:200', b_naverage=-10, b_niterate=5,
                    b_low_reject=3.0, b_high_reject=3.0, nfind=1, t_nsum=15,
                    t_step=15, t_nlost=200, t_function='legendre', t_order=5,
                    t_niterate=5, t_low_reject=3.0, t_high_reject=3.0,
@@ -814,7 +645,13 @@ def extract(fs=None):
                       value=pyfits.getval(f, 'CCDSUM'))
 
         # Extract the corresponding arc
-        arcname = glob('nrm/arc' + f.split('/')[1][3:8] + '*.fits')[0]
+        arcdbfn = (pyfits.getval(f, 'WAVESOLN', extname='SCI')).split('/')[1]
+        arcnames = glob('nrm/' + arcdbfn[0:8] + 'nrm' + arcdbfn[11:15] + '.fits')
+        if len(arcnames) == 0:
+            print("WARNING: no associated arc file?? for " + f)
+            break
+        arcname = arcnames[0]
+        print("Extracing corresponding arc: " + arcname)
         # set dispaxis = 1 just in case
         pyfits.setval(arcname, 'DISPAXIS', extname='SCI', value=1)
         iraf.unlearn(iraf.apsum)
@@ -824,7 +661,7 @@ def extract(fs=None):
                    edit='no', trace='no', fittrace='no', extras='no',
                    review='no', background='no', mode='hl')
         # copy the arc into the 5 column of the data cube
-        arcfs = glob('auxext_arc*.fits')
+        arcfs = sorted(glob('auxext_arc*.fits'))
         for af in arcfs:
             archdu = pyfits.open(af)
             scihdu = pyfits.open(outbase + '.fits', mode='update')
@@ -855,7 +692,7 @@ def extract(fs=None):
 def split1d(fs=None):
     iraf.cd('work')
     if fs is None:
-        fs = glob('x1d/sci*x1d????.fits')
+        fs = sorted(glob('x1d/sci*x1d????.fits'))
     if len(fs) == 0:
         print "WARNING: No extracted spectra to split."
         iraf.cd('..')
@@ -883,8 +720,12 @@ def split1d(fs=None):
 def spectoascii(fname, asciiname, ap=0):
     hdu = pyfits.open(fname)
     w = WCS(fname)
+    print ('-----w-----')
+    print(w)
     # get the wavelengths of the pixels
     npix = hdu[0].data.shape[2]
+    print('-----npix-----')
+    print (npix)
     lam = w.all_pix2world(np.linspace(0, npix - 1, npix), 0, 0, 0)[0]
     spec = hdu[0].data[0, ap]
     specerr = hdu[0].data[3, ap]
@@ -895,7 +736,7 @@ def spectoascii(fname, asciiname, ap=0):
 def stdsensfunc(fs=None):
     iraf.cd('work')
     if fs is None:
-        fs = glob('x1d/sci*x1d*c?.fits')
+        fs = sorted(glob('x1d/sci*x1d*c?.fits'))
     if len(fs) == 0:
         print "WARNING: No extracted spectra to create sensfuncs from."
         iraf.cd('..')
@@ -920,18 +761,21 @@ def stdsensfunc(fs=None):
             extfile = pysaltpath + '/data/site/suth_extinct.dat'
             iraf.unlearn(iraf.specsens)
             iraf.specsens(asciispec, outfile, stdfile, extfile,
-                          airmass=pyfits.getval(f, 'AIRMASS'),
+                          airmass=pyfits.getval(f, 'AIRMASS'), fitter='gaussian',
                           exptime=pyfits.getval(f, 'EXPTIME'), function='poly',
-                          order=11, clobber=True, mode='h', thresh=1e10)
+                          order=3, niter=3, clobber=True, mode='h', thresh=10)
             # delete the ascii file
+            S= np.genfromtxt(outfile,skip_header=40,skip_footer=40)
+            np.savetxt(outfile,S)
             os.remove(asciispec)
+            
     iraf.cd('..')
 
 
 def fluxcal(stdsfolder='./', fs=None):
     iraf.cd('work')
     if fs is None:
-        fs = glob('x1d/sci*x1d*c*.fits')
+        fs = sorted(glob('x1d/sci*x1d*c*.fits'))
     if len(fs) == 0:
         print "WARNING: No science chip spectra to flux calibrate."
         iraf.cd('..')
@@ -940,25 +784,26 @@ def fluxcal(stdsfolder='./', fs=None):
     if not os.path.exists('flx'):
         os.mkdir('flx')
     extfile = pysaltpath + '/data/site/suth_extinct.dat'
-    stdfiles = glob(stdsfolder + '/std/*sens*c?.dat')
-    print(stdfiles)
+    stdfiles = sorted(glob(stdsfolder + '/std/*sens*c?.dat'))
     for f in fs:
         outfile = f.replace('x1d', 'flx')
         chip = outfile[-6]
         hdu = pyfits.open(f)
-        ga = f.split('/')[1][3:8]
+        ga = float(f.split('/')[1][3:8])
         # Get the standard sensfunc with the same grating angle
         stdfile = None
         for stdf in stdfiles:
-            if ga in stdf:
+            stdfga = float(stdf.split('/')[-1][3:8])
+            if np.abs(ga-stdfga) < 0.019:
                 # Get the right chip number
                 if chip == stdf[-5]:
                     stdfile = stdf
                     break
         if stdfile is None:
-            print('No standard star with grating-angle %s' % ga)
+            print('No standard star with grating-angle close enough to %f' % ga)
             continue
         # for each extracted aperture
+        print("Flux calibrating " + f + " with " + stdfile)
         for i in range(hdu[0].data.shape[1]):
             # create an ascii file that pysalt can read
             asciiname = 'flx/sciflx.dat'
@@ -1004,17 +849,94 @@ def combine_spec_chi2(p, lam, specs, specerrs):
                 errs2 += scaled_spec_err[j][w] ** 2.0
                 chi += (residuals ** 2.0 / errs2).sum()
     return chi
+#change to pixels
+def trim(fs=None):
+	iraf.cd('work')
+	if fs is None:
+		fs=sorted(glob('flx/sci*c?.fits'))
+	if not os.path.exists('trm'):
+		os.mkdir('trm')
+	for i,f in enumerate(fs):
+		outfile=f.replace('flx','trm')
+		w=WCS(f)
+		hdu= pyfits.open(f)
+		npix=hdu[0].data.shape[2]
+		W1=int(w.wcs_pix2world(2,0,0,0)[0])
+		W2=int(w.wcs_pix2world(npix-2,0,0,0)[0])
+		iraf.sarith(input1=f,op='copy',output=outfile,w1=W1,w2=W2
+		,clobber='yes')
+	iraf.cd('..')
+def scopy():
+    if not os.path.exists('flx/test/'):
+        os.mkdir(Path+'flx/test/')
+    fs= sorted(glob('flx/sci*c?.fits'))
+    for i,f in enumerate(fs):
+        iraf.scopy(f+'[*,1,1]','flx/test/'+'sci'+str(i)+'.fits')
 
+def wspectext():
+    if not os.path.exists('flx/test3/'):
+        os.mkdir('flx/test3/')
+    fs= sorted(glob('flx/test/'+'/sci*.fits'))
+    iraf.cd('flx/test/')
+    for i,f in enumerate(fs):
+        iraf.wspectext(f,('sci'+str(i)+'.dat'))
+    iraf.cd('..')
+    iraf.cd('..')
+def diagnostic():
+	import matplotlib.pyplot as plt
 
+	a= 'sci0.dat'
+	b= 'sci1.dat'
+	c= 'sci2.dat'
+	d= 'sci3.dat'
+	e= 'sci4.dat'
+	f= 'sci5.dat'
+	g= 'sci6.dat'
+	h= 'sci7.dat'
+	i= 'sci8.dat'
+	j= 'sci9.dat'
+	k= 'sci10.dat'
+	l= 'sci11.dat'
+
+	A= 'flx/test3/'+a
+	B= 'flx/test3/'+b
+	C= 'flx/test3/'+c
+	D= 'flx/test3/'+d
+	E= 'flx/test3/'+e
+	F= 'flx/test3/'+f
+	G= 'flx/test3/'+g
+	H= 'flx/test3/'+h
+	I= 'flx/test3/'+i
+	J= 'flx/test3/'+j
+	K= 'flx/test3/'+k
+	L= 'flx/test3/'+l
+
+	plt.plot(*np.loadtxt(A,unpack=True), linewidth=2.0, label=a)
+	plt.plot(*np.loadtxt(B,unpack=True), linewidth=2.0, label=b)
+	plt.plot(*np.loadtxt(C,unpack=True), linewidth=2.0, label=c)
+	plt.plot(*np.loadtxt(D,unpack=True), linewidth=2.0, label=d)
+	plt.plot(*np.loadtxt(E,unpack=True), linewidth=2.0, label=e)
+	plt.plot(*np.loadtxt(F,unpack=True), linewidth=2.0, label=f)
+	plt.plot(*np.loadtxt(G,unpack=True), linewidth=2.0, label=g)
+	plt.plot(*np.loadtxt(H,unpack=True), linewidth=2.0, label=h)
+	plt.plot(*np.loadtxt(I,unpack=True), linewidth=2.0, label=i)
+	plt.plot(*np.loadtxt(J,unpack=True), linewidth=2.0, label=j)
+	plt.plot(*np.loadtxt(K,unpack=True), linewidth=2.0, label=k)
+	plt.plot(*np.loadtxt(L,unpack=True), linewidth=2.0, label=l)
+
+	plt.legend()
+	plt.pause(0.001)
+	plt.show()
+	return
 def speccombine(fs=None):
     iraf.cd('work')
     if fs is None:
-        fs = glob('flx/sci*c?.fits')
+        fs = sorted(glob('trm/sci*c?.fits'))
     if len(fs)==0:
         print("No flux calibrated images to combine.")
         iraf.cd('..')
         return
-    
+    #diagnostic()
     nsteps = 8001
     lamgrid = np.linspace(2000.0, 10000.0, nsteps)
 
@@ -1026,10 +948,18 @@ def speccombine(fs=None):
     ap = 0
     for i, f in enumerate(fs):
         hdu = pyfits.open(f)
-        w = WCS(f)
+    #	print ('---hdu.data---')
+    #	print (hdu[0].data)
+    	w=WCS(f)
+    # 	print ('-----w-----')
+    #	print(w)
         # get the wavelengths of the pixels
         npix = hdu[0].data.shape[2]
+    #	print('-----npix-----')
+    #	print(npix)
         lam = w.all_pix2world(np.linspace(0, npix - 1, npix), 0, 0, 0)[0]
+    #	print('-----lam-----')
+    #	print(lam)
         # interpolate each spectrum onto a comman wavelength scale
 
         specs[i] = interp(lamgrid, lam, hdu[0].data[0][ap],
@@ -1039,7 +969,8 @@ def speccombine(fs=None):
         # close. Also we don't include terms in the variance for the
         # uncertainty in the wavelength solution.
         specerrs[i] = interp(lamgrid, lam, hdu[0].data[3][ap] ** 2.0) ** 0.5
-
+    #print ('-----specs-----')
+    #print (specs)
     # minimize the chi^2 given free parameters are multiplicative factors
     # We could use linear or quadratic, but for now assume constant
     p0 = np.ones(nfs)
@@ -1079,25 +1010,39 @@ def speccombine(fs=None):
     #   we assume there is a c1.fits file for each image
     c1fs = [f for f in fs if 'c1.fits' in f]
     avgjd = np.mean([pyfits.getval(f,'JD') for f in c1fs])
-    pyfits.setval(combfile,'JD',value=avgjd)
+    pyfits.setval(combfile,'JD',value=avgjd,comment='average of multiple exposures')
     print "average JD = " + str(avgjd)
     sumet = np.sum([pyfits.getval(f,'EXPTIME') for f in c1fs])
-    pyfits.setval(combfile,'EXPTIME',value=sumet)
+    pyfits.setval(combfile,'EXPTIME',value=sumet,comment='sum of multiple exposures')
     print "total EXPTIME = " + str(sumet)
     avgam = np.mean([pyfits.getval(f,'AIRMASS') for f in c1fs])
-    pyfits.setval(combfile,'AIRMASS',value=avgam)
+    pyfits.setval(combfile,'AIRMASS',value=avgam,comment='average of multiple exposures')
     print "avg AIRMASS = " + str(avgam)
 
+    # update this to used avg jd midpoint of all exposures? 
+    print "barycentric velocity correction (km/s) = ", 
+    iraf.bcvcorr(spectra=combfile,keytime='UTC-OBS',keywhen='mid',
+                 obslong="339:11:16.8",obslat="-32:22:46.2",obsalt='1798',obsname='saao', 
+                 savebcv='yes',savejd='yes',printmode=2)
+    pyfits.setval(combfile,'UTMID',comment='added by RVSAO task BCVCORR')
+    pyfits.setval(combfile,'GJDN',comment='added by RVSAO task BCVCORR')
+    pyfits.setval(combfile,'HJDN',comment='added by RVSAO task BCVCORR')
+    pyfits.setval(combfile,'BCV',comment='added by RVSAO task BCVCORR (km/s)')
+    pyfits.setval(combfile,'HCV',comment='added by RVSAO task BCVCORR (km/s)')
+    iraf.dopcor(input=combfile,output='',redshift=-iraf.bcvcorr.bcv,isvelocity='yes',
+                add='no',dispersion='yes',flux='no',verbose='yes')
+    pyfits.setval(combfile,'DOPCOR01',comment='barycentric velocity correction applied')
+
     iraf.cd('..')
-    return specs
 
 
 # Define the telluric bands wavelength regions
 # These numbers were taken directly from Tom Matheson's Cal code from Jeff
 # Silverman
 #telluricWaves = {'B': (6855, 6935), 'A': (7590, 7685)}
-telluricWaves = [(2000., 3190.), (3216., 3420.), (5500., 6050.), (6250., 6360.),
-                 (6450., 6530.), (6840., 7410.), (7560., 8410.), (8800., 9900.)]
+#telluricWaves = [(2000., 3190.), (3216., 3420.), (5500., 6050.), (6250., 6360.),
+#                 (6450., 6530.), (6840., 7410.), (7560., 8410.), (8800., 9900.)]
+telluricWaves = [(6250., 6360.), (6450., 6530.), (6855., 7400.), (7580., 7720.)]
 
 
 def fitshdr_to_wave(hdr):
@@ -1111,7 +1056,7 @@ def fitshdr_to_wave(hdr):
 def mktelluric(fs=None):
     iraf.cd('work')
     if fs is None:
-        fs = glob('sci_com.fits')
+        fs = sorted(glob('sci_com.fits'))
     if len(fs) == 0:
         print "WARNING: No flux-calibrated spectra to make the a telluric correction."
         iraf.cd('..')
@@ -1240,14 +1185,18 @@ def fitxcor(warr, farr, telwarr, telfarr):
 if __name__ == '__main__':
     # Parse the input arguments.
     import argparse
-    parser = argparse.ArgumentParser(description='Reduce long-slit RSS SALT data. Available stages are %s.' % allstages)
+    parser = argparse.ArgumentParser(description='Reduce long-slit RSS SALT data. Available stages are: %s.' % allstages)
     parser.add_argument('--files', default=None, metavar='files', help='Files to work on.')
-    parser.add_argument('--stages', default='all', metavar='stages', help='Stages to run. Can be "all", a comma separated list, or a range delineated by a "-".')
+    parser.add_argument('--stages', default='all', metavar='stages', 
+        help='Stages to run. Can be "all", a comma separated list, or a range delineated by a "-". Default is "all".')
     parser.add_argument('--stdfolder', metavar='stdfolder', default='./',
                help='Path to the standard star file folder to use for flux calibration and telluric correction.')
     parser.add_argument('--flatfolder', metavar='flatfolder', default=None,
-               help='Path to the file folder with previous flat fields to use if we did not obtain new flats.')
+               help='[Obsolete] Path to the file folder with previous flat fields to use if we did not obtain new flats.')
+    parser.add_argument("--bright", action="store_true", help="Less aggressive cosmic ray removal for bright objects.")
+    parser.add_argument("--fastred", action="store_true", help='Data is from the "fast" quicklook, nightime pipeline.')
     args = parser.parse_args()
     load_modules()
-    run(files=args.files, dostages=args.stages, stdsfolder=args.stdfolder, flatfolder=args.flatfolder)
+    run(files=args.files, dostages=args.stages, stdsfolder=args.stdfolder, flatfolder=args.flatfolder, 
+        brightstar=args.bright, fastred=args.fastred)
     sys.exit("Thanks for using this pipeline!")
